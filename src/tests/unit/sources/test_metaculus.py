@@ -9,8 +9,7 @@ import pytest
 
 from _schemas import MetaculusFetchFrame, QuestionFrame, ResolutionFrame
 from sources.metaculus import MetaculusSource
-
-from .conftest import (
+from tests.factories import (
     make_metaculus_fetch_df,
     make_metaculus_market,
     make_metaculus_search_result,

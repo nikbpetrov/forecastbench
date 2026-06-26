@@ -8,7 +8,7 @@ import pytest
 
 from _fb_types import NullifiedQuestion, SourceType
 from sources._base import BaseSource
-from tests.conftest import make_forecast_df, make_question_df
+from tests.factories import make_forecast_df, make_question_df
 
 # ---------------------------------------------------------------------------
 # Test-only concrete subclass

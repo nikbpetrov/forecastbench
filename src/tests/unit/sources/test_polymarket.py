@@ -13,8 +13,7 @@ from sources.polymarket import (
     FailedConditionIdsError,
     PolymarketSource,
 )
-
-from .conftest import (
+from tests.factories import (
     make_polymarket_api_market,
     make_polymarket_fetch_df,
     make_polymarket_price_history,

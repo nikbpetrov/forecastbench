@@ -1,0 +1,271 @@
+"""End-to-end: one offline run of the whole ForecastBench data flow, checked at every stage.
+
+Mimics the nightly pipeline with no GCP and no network, across multiple sources and stages,
+parameterized by scenario so behaviour is asserted *throughout*:
+
+    bucket update (polymarket) + seeded banks (metaculus, fred)
+        → explode_question_set → resolve_all → impute → leaderboard scoring/ordering
+
+The sources are deliberately heterogeneous:
+- polymarket — an OPEN market resolved through a real ``local_bucket`` round-trip (its ``update``
+  driver). Open markets resolve to a tracked value but ``resolved=False``, so the leaderboard
+  correctly excludes them — we assert that.
+- metaculus — a RESOLVED market (binary 0/1), which the leaderboard scores.
+- fred — a dataset source with two resolution dates (resolves to 1.0 / 0.0), also scored.
+
+The ``nullified`` parameter adds a nullified polymarket question and asserts it is dropped end to
+end. Narrow seam behaviours live in ``integration/``; per-stage edge cases live in ``unit/`` —
+this asserts the stages compose.
+"""
+
+from datetime import date
+
+import pandas as pd
+import pytest
+
+from _fb_types import SourceQuestionBank
+from leaderboard.main import (
+    BASELINE_ORG_NAIVE_MODEL,
+    MarketQuestionAdjustment,
+    brier_skill_score,
+    combine_forecasting_rounds,
+    get_df_info,
+    peer_score,
+    score_models,
+)
+from orchestration.func_polymarket_update.main import driver as polymarket_update_driver
+from resolve._impute import impute_missing_forecasts
+from resolve._prepare import check_and_prepare_forecast_file, set_resolution_dates
+from resolve.explode_question_set import explode_question_set
+from resolve.resolve_all import resolve_all
+from sources.polymarket import PolymarketSource
+from sources.registry import SOURCES
+from tests._golden import check_golden
+from tests.factories import (
+    make_polymarket_fetch_df,
+    make_question_df,
+    make_question_set_df,
+    make_resolution_df,
+)
+
+_DUE = date(2025, 1, 1)
+_DUE_STR = "2025-01-01"
+# Daily polymarket price series spanning the window (yesterday == 2025-01-31 after freeze).
+_PRICE_HISTORY = [{"date": f"2025-01-{d:02d}", "value": 0.4 + d * 0.01} for d in range(1, 32)]
+
+
+def _polymarket_bank_from_bucket(local_bucket) -> SourceQuestionBank:
+    """Read back the polymarket bank the update driver persisted to the bucket."""
+    dfq = local_bucket.read_questions("polymarket")
+    ids = local_bucket.list_resolution_ids("polymarket")
+    dfr = pd.concat(
+        [local_bucket.read_resolution_file("polymarket", qid) for qid in ids], ignore_index=True
+    )
+    dfr["date"] = pd.to_datetime(dfr["date"])
+    return SourceQuestionBank(dfq=dfq, dfr=dfr)
+
+
+def _build_bank(local_bucket, nullified_id):
+    """Build a 3-source question bank: polymarket via bucket update, metaculus + fred seeded."""
+    pm_rows = [{"id": "pm1", "resolved": False, "historical_prices": _PRICE_HISTORY}]
+    if nullified_id:
+        pm_rows.append({"id": nullified_id, "resolved": False, "historical_prices": _PRICE_HISTORY})
+    local_bucket.seed_questions("polymarket", [])
+    local_bucket.seed_fetch("polymarket", make_polymarket_fetch_df(pm_rows).to_dict("records"))
+    polymarket_update_driver(None)  # real driver writes bank + resolution files to the bucket
+
+    # A RESOLVED market: closed (dfq.resolved=True), binary final value, resolution date after due.
+    metaculus = SourceQuestionBank(
+        dfq=make_question_df(
+            [
+                {
+                    "id": "mc1",
+                    "source": "metaculus",
+                    "resolved": True,
+                    "market_info_resolution_datetime": "2025-01-31T00:00:00Z",
+                }
+            ]
+        ),
+        dfr=make_resolution_df(
+            [
+                {"id": "mc1", "date": "2025-01-01", "value": 0.6},
+                {"id": "mc1", "date": "2025-01-31", "value": 1.0},
+            ]  # final value 1.0 -> resolved_to 1
+        ),
+    )
+    fred = SourceQuestionBank(
+        dfq=make_question_df([{"id": "fr1", "source": "fred"}]),
+        dfr=make_resolution_df(
+            [
+                {"id": "fr1", "date": "2025-01-01", "value": 100},  # baseline at due date
+                {"id": "fr1", "date": "2025-01-08", "value": 110},  # 7d horizon, > 100 -> 1.0
+                {"id": "fr1", "date": "2025-01-31", "value": 90},  # 30d horizon, < 100 -> 0.0
+            ]
+        ),
+    )
+    return {
+        "polymarket": _polymarket_bank_from_bucket(local_bucket),
+        "metaculus": metaculus,
+        "fred": fred,
+    }
+
+
+def _question_set(nullified_id):
+    rows = [
+        {"id": "pm1", "source": "polymarket", "resolution_dates": "N/A"},
+        {"id": "mc1", "source": "metaculus", "resolution_dates": "N/A"},
+        {"id": "fr1", "source": "fred", "resolution_dates": ["2025-01-08", "2025-01-31"]},
+    ]
+    if nullified_id:
+        rows.append({"id": nullified_id, "source": "polymarket", "resolution_dates": "N/A"})
+    return make_question_set_df(rows)
+
+
+def _leaderboard_entry(org, model, forecast_fn, resolved):
+    """Run a model's forecasts through prepare → merge → impute → get_df_info (the real chain)."""
+    forecast_df = pd.DataFrame(
+        [
+            {
+                "id": row["id"],
+                "source": row["source"],
+                "direction": (),
+                "forecast": forecast_fn(row["resolved_to"]),
+                "resolution_date": pd.Timestamp(row["resolution_date"]).strftime("%Y-%m-%d"),
+            }
+            for _, row in resolved.iterrows()
+        ]
+    )
+    prepared = check_and_prepare_forecast_file(forecast_df, _DUE_STR, org)
+    merged = set_resolution_dates(prepared, resolved)
+    imputed = impute_missing_forecasts(merged, org, org, model)
+    return get_df_info(
+        imputed, {"organization": org, "model": model, "model_organization": org}, _DUE_STR
+    )
+
+
+@pytest.mark.parametrize("nullified", [False, True])
+def test_full_pipeline(nullified, local_bucket, freeze_today):
+    freeze_today(date(2025, 2, 1))  # yesterday == 2025-01-31
+    nullified_id = (
+        sorted(PolymarketSource().get_nullified_ids(as_of=_DUE))[0] if nullified else None
+    )
+
+    # --- Stage 1: build the multi-source question bank ---
+    bank = _build_bank(local_bucket, nullified_id)
+    if nullified:
+        # The nullified question really is in the bucket-persisted bank (so resolve must drop it).
+        assert nullified_id in bank["polymarket"].dfq["id"].astype(str).tolist()
+
+    # --- Stage 2: explode the question set ---
+    exploded = explode_question_set(_question_set(nullified_id), _DUE_STR)
+    assert (exploded["source"] == "fred").sum() == 2  # two resolution dates
+
+    # --- Stage 3: resolve ---
+    resolved, _ = resolve_all(
+        exploded,
+        question_bank=bank,
+        sources={name: SOURCES[name] for name in bank},
+        forecast_due_date=_DUE,
+    )
+    # The nullified question is dropped; the real questions are present in every scenario.
+    assert set(resolved["id"]) == {"pm1", "mc1", "fr1"}
+    # Open polymarket market: tracked value in [0, 1] but NOT marked resolved.
+    pm = resolved[resolved["id"] == "pm1"].iloc[0]
+    assert 0 <= pm["resolved_to"] <= 1 and not bool(pm["resolved"])
+    # Resolved metaculus market: binary outcome, marked resolved.
+    mc = resolved[resolved["id"] == "mc1"].iloc[0]
+    assert bool(mc["resolved"]) and mc["resolved_to"] == 1.0
+    # Dataset resolves to 1.0 (value rose) and 0.0 (value fell).
+    assert set(resolved[resolved["id"] == "fr1"]["resolved_to"]) == {1.0, 0.0}
+
+    # --- Stage 4: imputation fills a forecaster's gaps ---
+    partial = pd.DataFrame(
+        [
+            {
+                "id": "mc1",
+                "source": "metaculus",
+                "direction": (),
+                "forecast": 0.8,
+                "resolution_date": "2025-01-31",
+            }
+        ]  # forecasts mc1 only -> the rest are imputed
+    )
+    prepared = check_and_prepare_forecast_file(partial, _DUE_STR, "PartialOrg")
+    merged = set_resolution_dates(prepared, resolved)
+    imputed = impute_missing_forecasts(merged, "PartialOrg", "PartialOrg", "PartialModel")
+    mc_row = imputed[imputed["id"] == "mc1"].iloc[0]
+    assert mc_row["forecast"] == 0.8 and bool(mc_row["imputed"]) is False
+    fr_rows = imputed[imputed["id"] == "fr1"]
+    assert (fr_rows["forecast"] == 0.5).all() and fr_rows["imputed"].all()  # gaps imputed to 0.5
+
+    # --- Stage 5: leaderboard scoring + ordering ---
+    entries = [
+        _leaderboard_entry(
+            BASELINE_ORG_NAIVE_MODEL["organization"],
+            BASELINE_ORG_NAIVE_MODEL["model"],
+            lambda rt: 0.5,
+            resolved,
+        ),
+        _leaderboard_entry("OrgGood", "Good", lambda rt: rt, resolved),  # Brier 0 on scored qs
+        _leaderboard_entry("OrgBad", "Bad", lambda rt: 1.0 - rt, resolved),  # worst
+    ]
+    combined = combine_forecasting_rounds(entries)
+    # Open markets are excluded from the leaderboard; only the resolved market + dataset are scored.
+    assert "pm1" not in set(combined["id"])
+    assert set(combined["id"]) == {"mc1", "fr1"}
+
+    lb, _ = score_models(
+        combined, [peer_score, brier_skill_score], MarketQuestionAdjustment.MARKET_BRIER
+    )
+    # 1 resolved market + 2 dataset (question, date) rows = 3 scored per model.
+    assert (lb["n_overall"] == 3).all()
+    ranked = lb.sort_values("peer_score_overall", ascending=False)["model"].tolist()
+    assert ranked[0] == "Good"
+    assert ranked.index("Good") < ranked.index("Bad")
+
+    # --- Regression goldens: freeze the resolved + scored frames (re-bless: UPDATE_GOLDEN=1) ---
+    # The anchors above pin the *intent*; these pin everything else so any drift surfaces as a
+    # reviewable CSV diff. See tests/_golden.py.
+    scenario = "nullified" if nullified else "base"
+    check_golden(
+        f"e2e_resolved_{scenario}",
+        resolved,
+        key=["id", "resolution_date"],
+        cols=["id", "source", "resolution_date", "resolved", "resolved_to"],
+    )
+    check_golden(f"e2e_leaderboard_{scenario}", lb, key="model_pk")
+
+
+def test_full_pipeline_is_deterministic(local_bucket, freeze_today):
+    """Re-running scoring on the same resolved data yields the same leaderboard (no hidden RNG)."""
+    freeze_today(date(2025, 2, 1))
+    bank = _build_bank(local_bucket, None)
+    exploded = explode_question_set(_question_set(None), _DUE_STR)
+    resolved, _ = resolve_all(
+        exploded,
+        question_bank=bank,
+        sources={name: SOURCES[name] for name in bank},
+        forecast_due_date=_DUE,
+    )
+
+    def _leaderboard():
+        entries = [
+            _leaderboard_entry(
+                BASELINE_ORG_NAIVE_MODEL["organization"],
+                BASELINE_ORG_NAIVE_MODEL["model"],
+                lambda rt: 0.5,
+                resolved,
+            ),
+            _leaderboard_entry("OrgA", "ModelA", lambda rt: abs(rt - 0.2), resolved),
+        ]
+        lb, _ = score_models(
+            combine_forecasting_rounds(entries),
+            [peer_score, brier_skill_score],
+            MarketQuestionAdjustment.MARKET_BRIER,
+        )
+        return lb.set_index("model_pk").sort_index()
+
+    first, second = _leaderboard(), _leaderboard()
+    pd.testing.assert_frame_equal(
+        first[sorted(first.columns)], second[sorted(second.columns)], check_exact=False, atol=1e-9
+    )

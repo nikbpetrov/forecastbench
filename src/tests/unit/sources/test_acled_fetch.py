@@ -31,7 +31,8 @@ def _load_acled_fetch_module(monkeypatch):
     monkeypatch.setitem(sys.modules, "utils.archiving", fake_archiving)
     monkeypatch.setitem(sys.modules, "utils", fake_utils)
 
-    module_path = Path(__file__).resolve().parents[1] / "questions" / "acled" / "fetch" / "main.py"
+    # src/ is three parents up from src/tests/unit/sources/.
+    module_path = Path(__file__).resolve().parents[3] / "questions" / "acled" / "fetch" / "main.py"
     module_name = "tests._acled_fetch_main"
     sys.modules.pop(module_name, None)
 

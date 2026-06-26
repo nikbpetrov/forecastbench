@@ -19,8 +19,8 @@ class TestSourceType:
     """Test SourceType enum."""
 
     def test_values_exist(self):
-        assert SourceType.MARKET is not None
-        assert SourceType.DATASET is not None
+        # The enum defines exactly the two source kinds the codebase branches on.
+        assert {m.name for m in SourceType} == {"MARKET", "DATASET"}
 
     def test_distinct(self):
         assert SourceType.MARKET != SourceType.DATASET

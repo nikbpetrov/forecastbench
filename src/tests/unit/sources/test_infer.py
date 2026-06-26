@@ -9,8 +9,7 @@ import pytest
 
 from _schemas import InferFetchFrame, QuestionFrame, ResolutionFrame
 from sources.infer import InferSource
-
-from .conftest import (
+from tests.factories import (
     make_infer_api_question,
     make_infer_fetch_df,
     make_infer_prediction_set,

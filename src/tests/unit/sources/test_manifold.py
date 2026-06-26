@@ -8,8 +8,7 @@ import pandas as pd
 
 from _schemas import ManifoldFetchFrame, QuestionFrame, ResolutionFrame
 from sources.manifold import ManifoldSource
-
-from .conftest import (
+from tests.factories import (
     make_manifold_api_market,
     make_manifold_bet,
     make_manifold_fetch_df,

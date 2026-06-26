@@ -7,7 +7,7 @@ import pandas as pd
 from helpers import fred as fred_helper
 from questions.fred.update_questions.main import update_questions
 from sources.fred import NULLIFIED_IDS, NULLIFIED_QUESTIONS, FredSource
-from tests.conftest import make_forecast_df, make_question_df, make_resolution_df
+from tests.factories import make_forecast_df, make_question_df, make_resolution_df
 
 
 class TestFredNullificationDefinition:

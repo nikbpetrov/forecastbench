@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from sources._market import MarketSource
-from tests.conftest import make_forecast_df, make_question_df, make_resolution_df
+from tests.factories import make_forecast_df, make_question_df, make_resolution_df
 
 # ---------------------------------------------------------------------------
 # _get_combo_question_resolution_date_helper

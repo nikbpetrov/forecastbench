@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from sources.wikipedia import QuestionType, WikipediaSource
-from tests.conftest import make_resolution_df
+from tests.factories import make_resolution_df
 
 # ---------------------------------------------------------------------------
 # _compare_values

@@ -8,7 +8,7 @@ import pytest
 
 from _fb_types import SourceQuestionBank
 from resolve.resolve_all import resolve_all
-from tests.conftest import make_forecast_df, make_question_df, make_resolution_df
+from tests.factories import make_forecast_df, make_question_df, make_resolution_df
 
 
 class _MockSource:

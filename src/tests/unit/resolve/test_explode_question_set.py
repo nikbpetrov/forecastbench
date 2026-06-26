@@ -3,7 +3,7 @@
 from datetime import date
 
 from resolve.explode_question_set import explode_question_set
-from tests.conftest import make_question_set_df
+from tests.factories import make_question_set_df
 
 
 class TestExplodeQuestionSet:

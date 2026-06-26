@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from sources.acled import AcledSource
-from tests.conftest import make_acled_resolution_df
+from tests.factories import make_acled_resolution_df
 
 # ---------------------------------------------------------------------------
 # Shared test data factory

@@ -10,7 +10,7 @@ from _schemas import YfinanceFetchFrame
 from helpers import constants
 from sources._metadata import SOURCE_METADATA
 from sources.yfinance import YfinanceSource
-from tests.conftest import (
+from tests.factories import (
     make_forecast_df,
     make_question_df,
     make_resolution_df,

@@ -3,7 +3,7 @@
 import pandas as pd
 import pytest
 
-from tests.conftest import make_forecast_df, make_question_df, make_resolution_df
+from tests.factories import make_forecast_df, make_question_df, make_resolution_df
 
 # ---------------------------------------------------------------------------
 # DatasetSource._resolve
