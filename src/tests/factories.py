@@ -6,11 +6,13 @@ row dicts (or **overrides) and fill sensible defaults so a test only specifies t
 it cares about.
 """
 
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 
 
-def make_forecast_df(rows):
+def make_forecast_df(rows: list[dict]) -> pd.DataFrame:
     """Build a DataFrame for resolution input.
 
     Each row is a dict with keys from:
@@ -36,7 +38,7 @@ def make_forecast_df(rows):
     return df
 
 
-def make_question_df(rows):
+def make_question_df(rows: list[dict]) -> pd.DataFrame:
     """Build a DataFrame matching QuestionFrame schema.
 
     Each row should have at least 'id'. Missing columns get defaults.
@@ -61,14 +63,16 @@ def make_question_df(rows):
     return df
 
 
-def make_resolution_df(rows):
+def make_resolution_df(rows: list[dict]) -> pd.DataFrame:
     """Build a DataFrame with [id, date, value] matching ResolutionFrame."""
     df = pd.DataFrame(rows)
     df["date"] = pd.to_datetime(df["date"])
     return df
 
 
-def make_acled_resolution_df(rows, event_columns=None):
+def make_acled_resolution_df(
+    rows: list[dict], event_columns: list[str] | None = None
+) -> pd.DataFrame:
     """Build a DataFrame matching AcledResolutionFrame.
 
     Args:
@@ -80,7 +84,7 @@ def make_acled_resolution_df(rows, event_columns=None):
     return df
 
 
-def make_question_set_df(rows):
+def make_question_set_df(rows: list[dict]) -> pd.DataFrame:
     """Build a DataFrame with [id, source, resolution_dates] for explode_question_set."""
     return pd.DataFrame(rows)
 
@@ -92,7 +96,7 @@ def make_question_set_df(rows):
 _DEFAULT_FORECAST_DUE_DATE = "2025-01-01"
 
 
-def make_raw_forecast_set(forecasts, **overrides):
+def make_raw_forecast_set(forecasts: list[dict], **overrides: object) -> dict:
     """Build a raw forecast-set dict as a forecaster uploads it to ``FORECAST_SETS_BUCKET``.
 
     ``func_resolve`` reads ``organization``/``model``/``model_organization``/``question_set`` and the
@@ -117,7 +121,7 @@ def make_raw_forecast_set(forecasts, **overrides):
     return base
 
 
-def make_processed_forecast_set(forecasts, **overrides):
+def make_processed_forecast_set(forecasts: list[dict], **overrides: object) -> dict:
     """Build a processed forecast-set dict as ``func_resolve`` writes to the processed bucket.
 
     Each forecast row is filled with the resolution fields the leaderboard compile path reads
@@ -174,7 +178,9 @@ _LEADERBOARD_MODELS = {
 }
 
 
-def make_leaderboard_entries(*, n_dataset=225, n_market=50, forecast_due_date="2024-01-01"):
+def make_leaderboard_entries(
+    *, n_dataset: int = 225, n_market: int = 50, forecast_due_date: str = "2024-01-01"
+) -> pd.DataFrame:
     """Build a real-data-shaped combined leaderboard frame for 2FE / bootstrap scoring.
 
     Produces the ForecastBench baselines (Naive Forecaster, Imputed Forecaster, Always 0.5) plus a
@@ -191,8 +197,8 @@ def make_leaderboard_entries(*, n_dataset=225, n_market=50, forecast_due_date="2
         pd.DataFrame: One row per (model, question), with the columns ``score_models`` consumes.
     """
     org = "ForecastBench"
-    questions = [("fred", f"d{i}", 7, i) for i in range(n_dataset)] + [
-        ("metaculus", f"k{i}", None, i) for i in range(n_market)
+    questions = [("fred", f"dataset_{i}", 7, i) for i in range(n_dataset)] + [
+        ("metaculus", f"market_{i}", None, i) for i in range(n_market)
     ]
     rows = []
     for model, base_error in _LEADERBOARD_MODELS.items():
@@ -235,7 +241,7 @@ def make_leaderboard_entries(*, n_dataset=225, n_market=50, forecast_due_date="2
 # ---------------------------------------------------------------------------
 
 
-def make_infer_api_question(**overrides):
+def make_infer_api_question(**overrides: object) -> dict:
     """Build a realistic INFER API question dict. Override specific fields as needed."""
     base = {
         "id": 9999,
@@ -278,7 +284,7 @@ def make_infer_api_question(**overrides):
     return base
 
 
-def make_infer_prediction_set(created_at, yes_prob):
+def make_infer_prediction_set(created_at: str, yes_prob: float) -> dict:
     """Build a realistic INFER prediction set dict."""
     return {
         "id": 999999,
@@ -302,7 +308,7 @@ def make_infer_prediction_set(created_at, yes_prob):
     }
 
 
-def make_infer_fetch_df(rows):
+def make_infer_fetch_df(rows: list[dict]) -> pd.DataFrame:
     """Build a DataFrame matching InferFetchFrame schema."""
     defaults = {
         "question": "N/A",
@@ -332,7 +338,7 @@ def make_infer_fetch_df(rows):
 # ---------------------------------------------------------------------------
 
 
-def make_yfinance_fetch_df(rows):
+def make_yfinance_fetch_df(rows: list[dict]) -> pd.DataFrame:
     """Build a DataFrame matching YfinanceFetchFrame schema.
 
     Each row should have at least 'id'. Missing columns get defaults.
@@ -364,7 +370,7 @@ def make_yfinance_fetch_df(rows):
 # ---------------------------------------------------------------------------
 
 
-def make_manifold_api_market(**overrides):
+def make_manifold_api_market(**overrides: object) -> dict:
     """Build a realistic Manifold market dict as returned by /market/{id}."""
     base = {
         "id": "mkt_001",
@@ -384,7 +390,7 @@ def make_manifold_api_market(**overrides):
     return base
 
 
-def make_manifold_search_result(**overrides):
+def make_manifold_search_result(**overrides: object) -> dict:
     """Build a search result item from /search-markets (subset of market fields)."""
     base = {
         "id": "mkt_001",
@@ -396,7 +402,7 @@ def make_manifold_search_result(**overrides):
     return base
 
 
-def make_manifold_bet(**overrides):
+def make_manifold_bet(**overrides: object) -> dict:
     """Build a single bet dict as returned by /bets endpoint."""
     base = {
         "id": "bet_001",
@@ -411,7 +417,7 @@ def make_manifold_bet(**overrides):
     return base
 
 
-def make_manifold_fetch_df(rows):
+def make_manifold_fetch_df(rows: list[dict]) -> pd.DataFrame:
     """Build a DataFrame matching ManifoldFetchFrame schema (just id column)."""
     return pd.DataFrame(rows)
 
@@ -421,7 +427,7 @@ def make_manifold_fetch_df(rows):
 # ---------------------------------------------------------------------------
 
 
-def make_metaculus_market(**overrides):
+def make_metaculus_market(**overrides: object) -> dict:
     """Build a realistic Metaculus per-question API response dict.
 
     Simulates GET /api/posts/{id}/ response. Supports nested overrides for the
@@ -477,7 +483,7 @@ def make_metaculus_market(**overrides):
     return base
 
 
-def make_metaculus_search_result(**overrides):
+def make_metaculus_search_result(**overrides: object) -> dict:
     """Build a single Metaculus search result entry (lighter than full market)."""
     base = {
         "id": 42472,
@@ -493,7 +499,7 @@ def make_metaculus_search_result(**overrides):
     return base
 
 
-def make_metaculus_fetch_df(ids):
+def make_metaculus_fetch_df(ids: list) -> pd.DataFrame:
     """Build a DataFrame matching MetaculusFetchFrame schema."""
     return pd.DataFrame({"id": [str(i) for i in ids]})
 
@@ -503,7 +509,7 @@ def make_metaculus_fetch_df(ids):
 # ---------------------------------------------------------------------------
 
 
-def make_polymarket_api_market(**overrides):
+def make_polymarket_api_market(**overrides: object) -> dict:
     """Build a realistic Polymarket Gamma API market dict.
 
     Override specific fields as needed. All JSON-encoded string fields
@@ -531,7 +537,7 @@ def make_polymarket_api_market(**overrides):
     return base
 
 
-def make_polymarket_price_history(entries):
+def make_polymarket_price_history(entries: list[tuple]) -> list[dict]:
     """Build a price history list as returned by the CLOB API.
 
     Args:
@@ -540,7 +546,7 @@ def make_polymarket_price_history(entries):
     return [{"t": t, "p": p} for t, p in entries]
 
 
-def make_polymarket_fetch_df(rows):
+def make_polymarket_fetch_df(rows: list[dict]) -> pd.DataFrame:
     """Build a DataFrame matching PolymarketFetchFrame schema."""
     defaults = {
         "question": "N/A",

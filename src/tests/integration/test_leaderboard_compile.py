@@ -24,21 +24,28 @@ _NEW = "2025-05-20"  # newer than the min-days cutoff → excluded
 _NAIVE = lb.BASELINE_ORG_NAIVE_MODEL
 
 
-def _resolved_mix():
+def _resolved_mix() -> list[dict]:
     """2 resolved dataset rows (distinct horizons) + 1 resolved market row."""
     return [
-        {"id": "fr_a", "source": "fred", "resolved": True, "resolution_date": "2025-01-08"},
-        {"id": "fr_b", "source": "fred", "resolved": True, "resolution_date": "2025-01-31"},
-        {"id": "mc_a", "source": "metaculus", "resolved": True, "resolution_date": "2025-01-15"},
+        {"id": "fred1", "source": "fred", "resolved": True, "resolution_date": "2025-01-08"},
+        {"id": "fred2", "source": "fred", "resolved": True, "resolution_date": "2025-01-31"},
+        {
+            "id": "metaculus1",
+            "source": "metaculus",
+            "resolved": True,
+            "resolution_date": "2025-01-15",
+        },
     ]
 
 
-def _unresolved_mix():
+def _unresolved_mix() -> list[dict]:
     """Same questions but none resolved → fails the min-resolved threshold."""
     return [{**row, "resolved": False} for row in _resolved_mix()]
 
 
-def _seed_model(local_bucket, due, org, model, forecasts, *, eligible=True):
+def _seed_model(
+    local_bucket, due: str, org: str, model: str, forecasts: list[dict], *, eligible: bool = True
+) -> None:
     payload = make_processed_forecast_set(
         forecasts,
         organization=org,
@@ -51,7 +58,7 @@ def _seed_model(local_bucket, due, org, model, forecasts, *, eligible=True):
     local_bucket.seed_processed_forecast_set(due, fname, payload)
 
 
-def _seed_naive(local_bucket, due, forecasts):
+def _seed_naive(local_bucket, due: str, forecasts: list[dict]) -> None:
     payload = make_processed_forecast_set(
         forecasts,
         organization=_NAIVE["organization"],
@@ -104,5 +111,5 @@ def test_compile_filters_dates_eligibility_and_min_resolved(local_bucket, freeze
     all_pks = set()
     for e in entries:
         all_pks |= set(e["question_pk"].astype(str))
-    assert f"{_KEEP}_fred_fr_a_7" in all_pks  # dataset: resolution_date − due (2025-01-08) = 7d
-    assert f"{_KEEP}_metaculus_mc_a" in all_pks  # market: no horizon component
+    assert f"{_KEEP}_fred_fred1_7" in all_pks  # dataset: resolution_date − due (2025-01-08) = 7d
+    assert f"{_KEEP}_metaculus_metaculus1" in all_pks  # market: no horizon component

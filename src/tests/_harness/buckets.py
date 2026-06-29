@@ -30,7 +30,7 @@ _BUCKET_ENV_VARS = {
 class LocalBucket:
     """A temp-dir-backed stand-in for the project's GCS buckets."""
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path) -> None:
         """Create the mount root and per-bucket subdirectories.
 
         Args:

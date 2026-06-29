@@ -65,13 +65,19 @@ def _polymarket_bank_from_bucket(local_bucket) -> SourceQuestionBank:
     return SourceQuestionBank(dfq=dfq, dfr=dfr)
 
 
-def _build_bank(local_bucket, nullified_id):
+def _build_bank(local_bucket, nullified_id: str | None) -> dict:
     """Build a 3-source question bank: polymarket via bucket update, metaculus + fred seeded."""
-    pm_rows = [{"id": "pm1", "resolved": False, "historical_prices": _PRICE_HISTORY}]
+    polymarket_rows = [
+        {"id": "polymarket1", "resolved": False, "historical_prices": _PRICE_HISTORY}
+    ]
     if nullified_id:
-        pm_rows.append({"id": nullified_id, "resolved": False, "historical_prices": _PRICE_HISTORY})
+        polymarket_rows.append(
+            {"id": nullified_id, "resolved": False, "historical_prices": _PRICE_HISTORY}
+        )
     local_bucket.seed_questions("polymarket", [])
-    local_bucket.seed_fetch("polymarket", make_polymarket_fetch_df(pm_rows).to_dict("records"))
+    local_bucket.seed_fetch(
+        "polymarket", make_polymarket_fetch_df(polymarket_rows).to_dict("records")
+    )
     polymarket_update_driver(None)  # real driver writes bank + resolution files to the bucket
 
     # A RESOLVED market: closed (dfq.resolved=True), binary final value, resolution date after due.
@@ -79,7 +85,7 @@ def _build_bank(local_bucket, nullified_id):
         dfq=make_question_df(
             [
                 {
-                    "id": "mc1",
+                    "id": "metaculus1",
                     "source": "metaculus",
                     "resolved": True,
                     "market_info_resolution_datetime": "2025-01-31T00:00:00Z",
@@ -88,18 +94,18 @@ def _build_bank(local_bucket, nullified_id):
         ),
         dfr=make_resolution_df(
             [
-                {"id": "mc1", "date": "2025-01-01", "value": 0.6},
-                {"id": "mc1", "date": "2025-01-31", "value": 1.0},
+                {"id": "metaculus1", "date": "2025-01-01", "value": 0.6},
+                {"id": "metaculus1", "date": "2025-01-31", "value": 1.0},
             ]  # final value 1.0 -> resolved_to 1
         ),
     )
     fred = SourceQuestionBank(
-        dfq=make_question_df([{"id": "fr1", "source": "fred"}]),
+        dfq=make_question_df([{"id": "fred1", "source": "fred"}]),
         dfr=make_resolution_df(
             [
-                {"id": "fr1", "date": "2025-01-01", "value": 100},  # baseline at due date
-                {"id": "fr1", "date": "2025-01-08", "value": 110},  # 7d horizon, > 100 -> 1.0
-                {"id": "fr1", "date": "2025-01-31", "value": 90},  # 30d horizon, < 100 -> 0.0
+                {"id": "fred1", "date": "2025-01-01", "value": 100},  # baseline at due date
+                {"id": "fred1", "date": "2025-01-08", "value": 110},  # 7d horizon, > 100 -> 1.0
+                {"id": "fred1", "date": "2025-01-31", "value": 90},  # 30d horizon, < 100 -> 0.0
             ]
         ),
     )
@@ -110,18 +116,20 @@ def _build_bank(local_bucket, nullified_id):
     }
 
 
-def _question_set(nullified_id):
+def _question_set(nullified_id: str | None) -> pd.DataFrame:
     rows = [
-        {"id": "pm1", "source": "polymarket", "resolution_dates": "N/A"},
-        {"id": "mc1", "source": "metaculus", "resolution_dates": "N/A"},
-        {"id": "fr1", "source": "fred", "resolution_dates": ["2025-01-08", "2025-01-31"]},
+        {"id": "polymarket1", "source": "polymarket", "resolution_dates": "N/A"},
+        {"id": "metaculus1", "source": "metaculus", "resolution_dates": "N/A"},
+        {"id": "fred1", "source": "fred", "resolution_dates": ["2025-01-08", "2025-01-31"]},
     ]
     if nullified_id:
         rows.append({"id": nullified_id, "source": "polymarket", "resolution_dates": "N/A"})
     return make_question_set_df(rows)
 
 
-def _leaderboard_entry(org, model, forecast_fn, resolved):
+def _leaderboard_entry(
+    org: str, model: str, forecast_fn, resolved: pd.DataFrame
+) -> pd.DataFrame | None:
     """Run a model's forecasts through prepare → merge → impute → get_df_info (the real chain)."""
     forecast_df = pd.DataFrame(
         [
@@ -168,35 +176,37 @@ def test_full_pipeline(nullified, local_bucket, freeze_today):
         forecast_due_date=_DUE,
     )
     # The nullified question is dropped; the real questions are present in every scenario.
-    assert set(resolved["id"]) == {"pm1", "mc1", "fr1"}
+    assert set(resolved["id"]) == {"polymarket1", "metaculus1", "fred1"}
     # Open polymarket market: tracked value in [0, 1] but NOT marked resolved.
-    pm = resolved[resolved["id"] == "pm1"].iloc[0]
-    assert 0 <= pm["resolved_to"] <= 1 and not bool(pm["resolved"])
+    polymarket = resolved[resolved["id"] == "polymarket1"].iloc[0]
+    assert 0 <= polymarket["resolved_to"] <= 1 and not bool(polymarket["resolved"])
     # Resolved metaculus market: binary outcome, marked resolved.
-    mc = resolved[resolved["id"] == "mc1"].iloc[0]
-    assert bool(mc["resolved"]) and mc["resolved_to"] == 1.0
+    metaculus = resolved[resolved["id"] == "metaculus1"].iloc[0]
+    assert bool(metaculus["resolved"]) and metaculus["resolved_to"] == 1.0
     # Dataset resolves to 1.0 (value rose) and 0.0 (value fell).
-    assert set(resolved[resolved["id"] == "fr1"]["resolved_to"]) == {1.0, 0.0}
+    assert set(resolved[resolved["id"] == "fred1"]["resolved_to"]) == {1.0, 0.0}
 
     # --- Stage 4: imputation fills a forecaster's gaps ---
     partial = pd.DataFrame(
         [
             {
-                "id": "mc1",
+                "id": "metaculus1",
                 "source": "metaculus",
                 "direction": (),
                 "forecast": 0.8,
                 "resolution_date": "2025-01-31",
             }
-        ]  # forecasts mc1 only -> the rest are imputed
+        ]  # forecasts metaculus1 only -> the rest are imputed
     )
     prepared = check_and_prepare_forecast_file(partial, _DUE_STR, "PartialOrg")
     merged = set_resolution_dates(prepared, resolved)
     imputed = impute_missing_forecasts(merged, "PartialOrg", "PartialOrg", "PartialModel")
-    mc_row = imputed[imputed["id"] == "mc1"].iloc[0]
-    assert mc_row["forecast"] == 0.8 and bool(mc_row["imputed"]) is False
-    fr_rows = imputed[imputed["id"] == "fr1"]
-    assert (fr_rows["forecast"] == 0.5).all() and fr_rows["imputed"].all()  # gaps imputed to 0.5
+    metaculus_row = imputed[imputed["id"] == "metaculus1"].iloc[0]
+    assert metaculus_row["forecast"] == 0.8 and bool(metaculus_row["imputed"]) is False
+    fred_rows = imputed[imputed["id"] == "fred1"]
+    assert (fred_rows["forecast"] == 0.5).all() and fred_rows[
+        "imputed"
+    ].all()  # gaps imputed to 0.5
 
     # --- Stage 5: leaderboard scoring + ordering ---
     entries = [
@@ -211,8 +221,8 @@ def test_full_pipeline(nullified, local_bucket, freeze_today):
     ]
     combined = combine_forecasting_rounds(entries)
     # Open markets are excluded from the leaderboard; only the resolved market + dataset are scored.
-    assert "pm1" not in set(combined["id"])
-    assert set(combined["id"]) == {"mc1", "fr1"}
+    assert "polymarket1" not in set(combined["id"])
+    assert set(combined["id"]) == {"metaculus1", "fred1"}
 
     lb, _ = score_models(
         combined, [peer_score, brier_skill_score], MarketQuestionAdjustment.MARKET_BRIER
@@ -248,7 +258,7 @@ def test_full_pipeline_is_deterministic(local_bucket, freeze_today):
         forecast_due_date=_DUE,
     )
 
-    def _leaderboard():
+    def _leaderboard() -> pd.DataFrame:
         entries = [
             _leaderboard_entry(
                 BASELINE_ORG_NAIVE_MODEL["organization"],

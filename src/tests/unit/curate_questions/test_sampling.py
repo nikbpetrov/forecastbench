@@ -67,7 +67,7 @@ def test_drop_missing_freeze_datetime():
 
 class TestHumanSampleQuestions:
     @staticmethod
-    def _values(n=20):
+    def _values(n: int = 20) -> dict:
         return {"dfq": make_question_df([{"id": f"q{i}", "source": "fred"} for i in range(n)])}
 
     def test_deterministic_with_seeded_rng(self):
@@ -89,7 +89,7 @@ class TestLLMDataSamplingIsSeeded:
     """The data-source LLM path (category-even ``.sample``) is reproducible under a seed."""
 
     @staticmethod
-    def _values(n=20):
+    def _values(n: int = 20) -> dict:
         rows = [
             {"id": f"q{i}", "source": "fred", "category": "Economics & Business"} for i in range(n)
         ]

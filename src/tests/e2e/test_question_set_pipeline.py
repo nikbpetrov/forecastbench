@@ -43,15 +43,15 @@ _MANIFOLD = [
     {"id": "bad1", "question": "Inappropriate personal Q?", "freeze_datetime_value": "0.3"},
 ]
 _FRED = [
-    {"id": "f1", "question": "Will CPI rise?", "freeze_datetime_value": "100"},
-    {"id": "f2", "question": "Will GDP rise?", "freeze_datetime_value": "200"},
+    {"id": "fred1", "question": "Will CPI rise?", "freeze_datetime_value": "100"},
+    {"id": "fred2", "question": "Will GDP rise?", "freeze_datetime_value": "200"},
 ]
 
 
-def _run_metadata_jobs(local_bucket):
+def _run_metadata_jobs(local_bucket) -> pd.DataFrame:
     """Tag then validate the seeded banks (LLM mocked), writing question_metadata.jsonl."""
 
-    def fake_validate(model_name, prompt, max_tokens=None):
+    def fake_validate(model_name, prompt, max_tokens=None) -> str:
         return "Classification: flag" if "Inappropriate" in prompt else "Classification: ok"
 
     with patch.object(tag.question_curation, "FREEZE_QUESTION_SOURCES", _SOURCES), patch.object(
@@ -71,7 +71,7 @@ def _run_metadata_jobs(local_bucket):
     return pd.read_json(local_bucket.question_bank_dir() / constants.META_DATA_FILENAME, lines=True)
 
 
-def _valid_questions(local_bucket, meta):
+def _valid_questions(local_bucket, meta: pd.DataFrame) -> pd.DataFrame:
     """Curate's intake: per source, drop invalid + freeze-less questions, then concat."""
     kept = []
     for source in _SOURCES:
@@ -93,13 +93,13 @@ def test_invalid_questions_never_reach_the_sampled_set(local_bucket):
     cat = dict(zip(meta["id"].astype(str), meta["category"]))
     valid = dict(zip(meta["id"].astype(str), meta["valid_question"]))
     assert cat["good1"] == "Politics & Governance"  # manifold -> LLM (mocked)
-    assert cat["f1"] == "Economics & Business"  # fred -> hard-coded
+    assert cat["fred1"] == "Economics & Business"  # fred -> hard-coded
     assert valid["good1"] is True and valid["bad1"] is False  # validator flagged the bad one
 
     # --- Stage 2: curate consumes the metadata; invalid is filtered out ---
     llm_pool = _valid_questions(local_bucket, meta)
     assert "bad1" not in set(llm_pool["id"])  # the flagged question is gone end to end
-    assert {"good1", "good2", "f1", "f2"} == set(llm_pool["id"])
+    assert {"good1", "good2", "fred1", "fred2"} == set(llm_pool["id"])
 
     # --- Stage 3: the human set is a deterministic subset of the LLM set ---
     human = human_sample_questions({"dfq": llm_pool}, 2, random_state=0)
@@ -155,16 +155,16 @@ _CURATE_GOLDEN_COLS = [
 ]
 
 
-def _seed_curate_inputs(local_bucket):
+def _seed_curate_inputs(local_bucket) -> None:
     """8 markets + 8 datasets, with one invalid / one resolved / one ``Other`` to be filtered out."""
     manifold = make_question_df(
         [
             {
-                "id": f"m{i}",
+                "id": f"manifold{i}",
                 "source": "manifold",
                 "question": f"Market question {i}?",
-                "url": f"https://example.com/m{i}",
-                "resolved": i == 1,  # m1 is resolved → excluded
+                "url": f"https://example.com/manifold{i}",
+                "resolved": i == 1,  # manifold1 is resolved → excluded
                 "freeze_datetime_value": "0.5",
                 "market_info_close_datetime": _CURATE_CLOSE,
             }
@@ -174,10 +174,10 @@ def _seed_curate_inputs(local_bucket):
     fred = make_question_df(
         [
             {
-                "id": f"f{i}",
+                "id": f"fred{i}",
                 "source": "fred",
                 "question": f"Data question {i}?",
-                "url": f"https://example.com/f{i}",
+                "url": f"https://example.com/fred{i}",
                 "resolved": False,
                 "freeze_datetime_value": str(100 + i),
                 "forecast_horizons": [7, 30],  # non-empty → survives the resolve-too-soon filter
@@ -191,16 +191,16 @@ def _seed_curate_inputs(local_bucket):
     meta = [
         {
             "source": "manifold",
-            "id": f"m{i}",
+            "id": f"manifold{i}",
             "category": "Politics & Governance",
-            "valid_question": i != 0,  # m0 is invalid → excluded
+            "valid_question": i != 0,  # manifold0 is invalid → excluded
         }
         for i in range(8)
     ] + [
         {
             "source": "fred",
-            "id": f"f{i}",
-            "category": "Other" if i == 0 else "Economics & Business",  # f0 "Other" → excluded
+            "id": f"fred{i}",
+            "category": "Other" if i == 0 else "Economics & Business",  # fred0 "Other" → excluded
             "valid_question": True,
         }
         for i in range(8)
@@ -208,7 +208,7 @@ def _seed_curate_inputs(local_bucket):
     local_bucket.seed_metadata(meta)
 
 
-def _run_curate_driver(local_bucket, monkeypatch):
+def _run_curate_driver(local_bucket, monkeypatch) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Run the real driver on the seeded inputs; return the published (llm, human) question sets."""
     _seed_curate_inputs(local_bucket)
     monkeypatch.delenv("RUNNING_LOCALLY", raising=False)  # so write_questions writes to the bucket
@@ -224,7 +224,7 @@ def _run_curate_driver(local_bucket, monkeypatch):
         stack.enter_context(patch.object(qc, "is_today_question_curation_date", return_value=True))
         curate.driver(None)
 
-    def _read(target):
+    def _read(target: str) -> pd.DataFrame:
         payload = local_bucket.read_json("QUESTION_SETS_BUCKET", f"2025-01-11-{target}.json")
         return pd.DataFrame(payload["questions"])
 
@@ -237,10 +237,10 @@ def test_curate_driver_builds_question_set(local_bucket, monkeypatch):
     # --- Anchors: the filter chain + even cross-source allocation are correct ---
     assert len(llm) == 8  # 4 market + 4 data (FREEZE_NUM_LLM_QUESTIONS // 2 per question type)
     ids = set(llm["id"])
-    assert "m0" not in ids and "m1" not in ids  # invalid + resolved markets dropped
-    assert "f0" not in ids  # "Other"-category dataset dropped
-    assert set(llm[llm["source"] == "manifold"]["id"]) <= {f"m{i}" for i in range(2, 8)}
-    assert set(llm[llm["source"] == "fred"]["id"]) <= {f"f{i}" for i in range(1, 8)}
+    assert "manifold0" not in ids and "manifold1" not in ids  # invalid + resolved markets dropped
+    assert "fred0" not in ids  # "Other"-category dataset dropped
+    assert set(llm[llm["source"] == "manifold"]["id"]) <= {f"manifold{i}" for i in range(2, 8)}
+    assert set(llm[llm["source"] == "fred"]["id"]) <= {f"fred{i}" for i in range(1, 8)}
     assert (llm["source"] == "manifold").sum() == 4 and (llm["source"] == "fred").sum() == 4
 
     # Enrichment: resolution_criteria URL-templated, source_intro + freeze_datetime stamped.

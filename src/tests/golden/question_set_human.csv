@@ -1,5 +1,5 @@
 source,id,question,freeze_datetime_value,freeze_datetime,market_info_close_datetime,resolution_criteria,source_intro
-fred,f2,Data question 2?,102,2025-01-01T00:00:00,N/A,Resolves per https://example.com/f2.,FRED intro.
-fred,f4,Data question 4?,104,2025-01-01T00:00:00,N/A,Resolves per https://example.com/f4.,FRED intro.
-manifold,m3,Market question 3?,0.5,2025-01-01T00:00:00,2025-03-12T00:00:00,Resolves per https://example.com/m3.,Manifold intro.
-manifold,m4,Market question 4?,0.5,2025-01-01T00:00:00,2025-03-12T00:00:00,Resolves per https://example.com/m4.,Manifold intro.
+fred,fred2,Data question 2?,102,2025-01-01T00:00:00,N/A,Resolves per https://example.com/fred2.,FRED intro.
+fred,fred4,Data question 4?,104,2025-01-01T00:00:00,N/A,Resolves per https://example.com/fred4.,FRED intro.
+manifold,manifold3,Market question 3?,0.5,2025-01-01T00:00:00,2025-03-12T00:00:00,Resolves per https://example.com/manifold3.,Manifold intro.
+manifold,manifold4,Market question 4?,0.5,2025-01-01T00:00:00,2025-03-12T00:00:00,Resolves per https://example.com/manifold4.,Manifold intro.
