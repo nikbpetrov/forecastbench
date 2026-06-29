@@ -86,6 +86,151 @@ def make_question_set_df(rows):
 
 
 # ---------------------------------------------------------------------------
+# Forecast-set factories (raw input to func_resolve; processed input to leaderboard)
+# ---------------------------------------------------------------------------
+
+_DEFAULT_FORECAST_DUE_DATE = "2025-01-01"
+
+
+def make_raw_forecast_set(forecasts, **overrides):
+    """Build a raw forecast-set dict as a forecaster uploads it to ``FORECAST_SETS_BUCKET``.
+
+    ``func_resolve`` reads ``organization``/``model``/``model_organization``/``question_set`` and the
+    ``forecasts`` list, then resolves them. Each forecast row needs at least ``id``, ``source``,
+    ``forecast``, ``resolution_date``; ``direction`` is optional (defaults to ``()`` downstream).
+
+    Args:
+        forecasts (list): Forecast row dicts.
+        **overrides: Top-level field overrides (e.g. ``leaderboard_eligible=False``). Pass
+            ``forecast_due_date`` to set the default ``question_set`` filename.
+    """
+    due = overrides.pop("forecast_due_date", _DEFAULT_FORECAST_DUE_DATE)
+    base = {
+        "organization": "OrgA",
+        "model": "ModelA",
+        "model_organization": "OrgA",
+        "question_set": f"{due}-llm.json",
+        "leaderboard_eligible": True,
+        "forecasts": forecasts,
+    }
+    base.update(overrides)
+    return base
+
+
+def make_processed_forecast_set(forecasts, **overrides):
+    """Build a processed forecast-set dict as ``func_resolve`` writes to the processed bucket.
+
+    Each forecast row is filled with the resolution fields the leaderboard compile path reads
+    (``resolved``/``resolved_to``/``imputed``/``resolution_date``); the top level carries
+    ``forecast_due_date``. Pass per-row dicts to override (e.g. ``resolved=False`` for an open
+    market, ``imputed=True`` for an imputed row).
+
+    Args:
+        forecasts (list): Forecast row dicts (id, source, plus any field overrides).
+        **overrides: Top-level field overrides (``organization``, ``model``,
+            ``leaderboard_eligible``, ``forecast_due_date``, ...).
+    """
+    due = overrides.pop("forecast_due_date", _DEFAULT_FORECAST_DUE_DATE)
+    rows = []
+    for row in forecasts:
+        merged = {
+            "direction": None,
+            "forecast": 0.5,
+            "resolution_date": due,
+            "resolved": True,
+            "resolved_to": 1.0,
+            "imputed": False,
+            "market_value_on_due_date": None,
+            "market_value_on_due_date_minus_one": None,
+        }
+        merged.update(row)
+        rows.append(merged)
+    base = {
+        "organization": "OrgA",
+        "model": "ModelA",
+        "model_organization": "OrgA",
+        "question_set": f"{due}-llm.json",
+        "forecast_due_date": due,
+        "leaderboard_eligible": True,
+        "forecasts": rows,
+    }
+    base.update(overrides)
+    return base
+
+
+# ---------------------------------------------------------------------------
+# Leaderboard-scoring factory (real-data-shaped, for the 2FE / bootstrap path)
+# ---------------------------------------------------------------------------
+
+# Mean Brier per model is driven by a base error; a per-question wiggle gives the two-way
+# fixed-effects regression enough variation to be identifiable (not rank-deficient). "Always 0.5"
+# forecasts exactly 0.5 (Brier 0.25) — the rescale anchor; ``None`` marks that special case.
+_LEADERBOARD_MODELS = {
+    "Good Model": 0.1,  # skilled  → low Brier  → ranks best
+    "Bad Model": 0.7,  # poor     → high Brier → ranks worst
+    "Naive Forecaster": 0.5,  # baseline (FE + brier-skill reference)
+    "Imputed Forecaster": 0.5,  # baseline (market question fixed effect under MARKET_BRIER)
+    "Always 0.5": None,  # baseline (difficulty rescale anchor)
+}
+
+
+def make_leaderboard_entries(*, n_dataset=225, n_market=50, forecast_due_date="2024-01-01"):
+    """Build a real-data-shaped combined leaderboard frame for 2FE / bootstrap scoring.
+
+    Produces the ForecastBench baselines (Naive Forecaster, Imputed Forecaster, Always 0.5) plus a
+    skilled and a poor model, each forecasting every dataset + market question, with per-question
+    difficulty so ``two_way_fixed_effects`` is identifiable. 2FE is degenerate on tiny input, so the
+    defaults approximate the production shape (``MIN_NUM_DATASET_QUESTIONS`` dataset questions).
+
+    Args:
+        n_dataset (int): Number of resolved dataset questions (fred).
+        n_market (int): Number of resolved market questions (metaculus).
+        forecast_due_date (str): The single forecast due date stamped on every row.
+
+    Returns:
+        pd.DataFrame: One row per (model, question), with the columns ``score_models`` consumes.
+    """
+    org = "ForecastBench"
+    questions = [("fred", f"d{i}", 7, i) for i in range(n_dataset)] + [
+        ("metaculus", f"k{i}", None, i) for i in range(n_market)
+    ]
+    rows = []
+    for model, base_error in _LEADERBOARD_MODELS.items():
+        model_pk = f"{org}_{org}_{model}"
+        for source, qid, horizon, j in questions:
+            truth = float(j % 2)
+            if base_error is None:
+                forecast = 0.5
+            else:
+                err = min(base_error + (j % 7) * 0.01, 0.95)
+                forecast = (1.0 - err) if truth == 1.0 else err
+            if horizon is None:
+                question_pk = f"{forecast_due_date}_{source}_{qid}"
+            else:
+                question_pk = f"{forecast_due_date}_{source}_{qid}_{horizon}"
+            rows.append(
+                {
+                    "organization": org,
+                    "model": model,
+                    "model_organization": org,
+                    "model_pk": model_pk,
+                    "source": source,
+                    "id": qid,
+                    "forecast_due_date": forecast_due_date,
+                    "resolution_date": forecast_due_date,
+                    "horizon": np.nan if horizon is None else horizon,
+                    "question_pk": question_pk,
+                    "forecast": forecast,
+                    "resolved_to": truth,
+                    "resolved": True,
+                    "imputed": False,
+                    "model_age_at_due_date": 0,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
 # INFER-specific factories
 # ---------------------------------------------------------------------------
 

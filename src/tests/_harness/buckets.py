@@ -63,6 +63,15 @@ class LocalBucket:
         """Write ``<source>_fetch.jsonl`` into the question bank."""
         return self._write_jsonl(self.question_bank_dir() / f"{source}_fetch.jsonl", rows)
 
+    def seed_metadata(self, rows: list) -> Path:
+        """Write ``question_metadata.jsonl`` into the question bank.
+
+        Seed this (even empty) before running a metadata job: the job reads via the hardcoded
+        ``/tmp/question_metadata.jsonl``, and ``download_and_read`` leaves that stale local file in
+        place on a 404 — so a clean bucket copy is what makes the run start from known state.
+        """
+        return self._write_jsonl(self.question_bank_dir() / "question_metadata.jsonl", rows)
+
     def seed_resolution_file(self, source: str, question_id: str, rows: list) -> Path:
         """Write a per-question ``<source>/<id>.jsonl`` resolution file."""
         path = self.question_bank_dir() / source / f"{question_id}.jsonl"
@@ -75,6 +84,22 @@ class LocalBucket:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload), encoding="utf-8")
         return path
+
+    def seed_forecast_set(self, date: str, filename: str, payload) -> Path:
+        """Write a raw forecast set at ``FORECAST_SETS_BUCKET/<date>/<filename>``.
+
+        ``func_resolve`` lists the bucket and groups by the leading ``<date>`` folder, so the
+        date prefix is what makes the file discoverable.
+        """
+        return self.seed_json("FORECAST_SETS_BUCKET", f"{date}/{filename}", payload)
+
+    def seed_question_set(self, filename: str, payload) -> Path:
+        """Write a question set at ``QUESTION_SETS_BUCKET/<filename>`` (e.g. ``<date>-llm.json``)."""
+        return self.seed_json("QUESTION_SETS_BUCKET", filename, payload)
+
+    def seed_processed_forecast_set(self, date: str, filename: str, payload) -> Path:
+        """Write a processed forecast set at ``PROCESSED_FORECAST_SETS_BUCKET/<date>/<filename>``."""
+        return self.seed_json("PROCESSED_FORECAST_SETS_BUCKET", f"{date}/{filename}", payload)
 
     # -- reading outputs --------------------------------------------------
 
@@ -96,6 +121,20 @@ class LocalBucket:
         if not src_dir.exists():
             return set()
         return {p.stem for p in src_dir.glob("*.jsonl")}
+
+    def read_json(self, bucket_env_var: str, filename: str):
+        """Read back a JSON file from the named bucket."""
+        path = self.root / self.bucket_names[bucket_env_var] / filename
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def read_processed_forecast_set(self, date: str, filename: str):
+        """Read back a processed forecast set written by ``func_resolve``."""
+        return self.read_json("PROCESSED_FORECAST_SETS_BUCKET", f"{date}/{filename}")
+
+    def list_processed_forecast_files(self) -> set:
+        """Return ``<date>/<file>`` relpaths present in the processed-forecast-sets bucket."""
+        root = self.root / self.bucket_names["PROCESSED_FORECAST_SETS_BUCKET"]
+        return {str(p.relative_to(root)) for p in root.rglob("*.json")}
 
     # -- internals --------------------------------------------------------
 

@@ -6,7 +6,8 @@ These run the real ``orchestration/func_*/main.py:driver()`` against a ``local_b
 ``IMPLEMENTED_SOURCES`` (derived from the registry in ``tests/_sources.py``).
 
 Source behaviour (parse/update logic) is NOT tested here — that lives in ``unit/sources/`` and
-``contract/sources/``. ``fetch()``/``update()`` are mocked so these stay pure wiring checks.
+``contract/test_update_conformance.py``. ``fetch()``/``update()`` are mocked so these stay pure
+wiring checks.
 
 Divergences are handled with a narrower test *in this file* (see README "integration"):
 
@@ -91,7 +92,8 @@ class TestUpdateDriverWiring:
     """Every update driver: read bank + fetch -> update() -> persist questions + resolution files.
 
     update() is mocked (it reaches the network in four of five sources); this asserts only that the
-    driver persists what update() returns. update()'s assembly contract lives in contract/sources/.
+    driver persists what update() returns. update()'s assembly contract lives in
+    contract/test_update_conformance.py.
     """
 
     @pytest.mark.parametrize("name", IMPLEMENTED_SOURCES)
@@ -125,7 +127,7 @@ class TestPolymarketUpdateRealChain:
 
     This proves the full read -> update -> write chain end to end (real update + real IO), which the
     mocked parametrized test above cannot. The other four sources fetch inside update(), so their
-    update() behaviour is covered offline in contract/sources/ instead.
+    update() behaviour is covered offline in contract/test_update_conformance.py instead.
     """
 
     def test_writes_questions_and_resolution_files(self, local_bucket):

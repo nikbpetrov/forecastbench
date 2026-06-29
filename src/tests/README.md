@@ -24,20 +24,27 @@ tests/
   unit/              many · pure, in-memory, one concern, no IO        ← the bulk
     sources/           per-source parse/update/resolution logic (HTTP mocked ad-hoc per source)
     resolve/           resolve_all, impute, prepare, explode
-    leaderboard/       scoring, masks, df_info, bootstrap, ordering invariants
+    leaderboard/       scoring, masks, df_info, bootstrap, ordering invariants, artifact serializers,
+                       2FE + bootstrap on a real-data-shaped fixture (test_two_way_fixed_effects.py)
+    curate_questions/  allocation/bin math, validity+freeze filters, seeded human sampling
+    metadata/          tag + validate parsing (LLM boundary mocked)
     test_base_source.py, test_market_source.py, test_dataset_source.py,
-    test_types_and_schemas.py, test_dates.py, test_invariants.py, test_curate_questions.py
+    test_types_and_schemas.py, test_dates.py, test_invariants.py
   contract/          system-wide guarantees, registry-parametrized
-    sources/           resolve() fail-fast + nullification + value/date invariants;
-                       update() output schema + exact columns per source
+    test_resolve_contract.py    resolve() fail-fast + nullification + value/date invariants (cross-source)
+    test_update_conformance.py  update() output schema + exact columns per source
     test_registry_coverage.py   every source is implemented-case or named-stub
     test_offline_imports.py     the covered job modules (sources, resolve, leaderboard) import offline
   integration/       two adjacent components across one real boundary (local bucket)
-    test_func_drivers.py        func_*/main.py:driver() wiring, parametrized over sources
+    test_source_drivers.py      func_*/main.py:driver() wiring, parametrized over sources
+    test_resolve_driver.py      func_resolve driver() raw → processed forecast-set round-trip
+    test_leaderboard_compile.py download_and_compile read → filter → compile seam
     test_orchestration_io.py    _source_io ↔ local bucket (incl. empty-file edge cases)
+    test_metadata_drivers.py    tag/validate driver() → question_metadata.jsonl (LLM mocked)
   e2e/               one offline product flow, end to end, parameterized by scenario
-    test_pipeline.py            bucket update → resolve → impute → leaderboard scoring/ordering,
+    test_resolution_pipeline.py bucket update → resolve → impute → leaderboard scoring/ordering,
                                 anchored by semantic asserts + golden snapshots of the outputs
+    test_question_set_pipeline.py  bank → tag/validate → metadata → drop_invalid → curate driver → golden
   live/              opt-in, real APIs, schema-asserted (NEVER in PR CI)
     test_api_conformance.py     consumed-field contracts for external APIs
   golden/            committed snapshot CSVs the e2e regression-checks against (re-bless on change)
@@ -94,8 +101,9 @@ the real APIs is caught by the opt-in `live/` suite.
 
 ## Registry-aware contracts
 
-`contract/sources/` is parametrized over `sources.registry` so a new source is covered
-automatically — but **registry-aware, not registry-blind**:
+The source contracts (`contract/test_resolve_contract.py`, `contract/test_update_conformance.py`)
+are parametrized over `sources.registry` so a new source is covered automatically — but
+**registry-aware, not registry-blind**:
 
 - `update()` reaches the network in four of five sources (resolution is built via the network), so
   `offline_update_case` (in `conftest.py`) patches the common `_build_resolution_df` seam, plus
@@ -110,11 +118,11 @@ automatically — but **registry-aware, not registry-blind**:
 
 ## Integration: parametrized driver wiring
 
-`integration/test_func_drivers.py` proves each `func_*/main.py:driver()` *wires* read → call →
+`integration/test_source_drivers.py` proves each `func_*/main.py:driver()` *wires* read → call →
 write against a `local_bucket`. The wiring is uniform across sources, so the contract is
 **parametrized over `IMPLEMENTED_SOURCES`** — a new source is covered the moment it joins the
 registry, no new file. `fetch()`/`update()` are **mocked** here on purpose: this layer is wiring
-only; parse/update *logic* lives in `unit/sources/` and `contract/sources/`.
+only; parse/update *logic* lives in `unit/sources/` and `contract/test_update_conformance.py`.
 
 When a source diverges, add a **narrower test in the same file** (don't fork the parametrization):
 
@@ -180,24 +188,25 @@ UPDATE_GOLDEN=1 make test ARGS="src/tests/e2e"  # re-bless e2e goldens (dev only
 | You want to test… | Put it in |
 | --- | --- |
 | A source's parse/update/resolution edge case on synthetic data | `unit/sources/test_<source>.py` (`make_*` factories; mock `requests` ad-hoc) |
-| Leaderboard scoring / ordering | `unit/leaderboard/` |
+| Leaderboard scoring / ordering / artifact serialization | `unit/leaderboard/` |
+| A `metadata`/`curate_questions` logic edge case | `unit/metadata/` or `unit/curate_questions/` (mock `model_eval.get_response_from_model` for the LLM) |
 | A guarantee every source/stage must satisfy | `contract/` (parametrize over the registry) |
-| A new source's `driver()` wiring | nothing — `integration/test_func_drivers.py` is parametrized over the registry; only add a test if it diverges |
+| A new source's `driver()` wiring | nothing — `integration/test_source_drivers.py` is parametrized over the registry; only add a test if it diverges |
 | The orchestration IO boundary | `integration/test_orchestration_io.py` with `local_bucket` |
-| A whole offline flow to the leaderboard | `e2e/test_pipeline.py` (semantic anchors + `check_golden`) |
+| The forecast-resolution flow to the leaderboard | `e2e/test_resolution_pipeline.py` (semantic anchors + `check_golden`) |
+| The question-set creation flow | `e2e/test_question_set_pipeline.py` (metadata → curate driver + `check_golden`) |
 | An external API's field contract | `live/` (mark `@pytest.mark.live`) |
 
 Time-dependent logic must use `freeze_today`; seed any RNG; never rely on row ordering.
 
 ## Expanding to other jobs (sources & resolve are just the start)
 
-This suite is deep on **sources → resolve → leaderboard** because those are *pure data transforms*
-(data in → data out) — the ideal fit for the mental frame. The remaining nightly jobs
-(`curate_questions`, `metadata`, `base_eval`, `nightly_update_workflow`, the website) aren't yet
-covered. The offline-import contract (`contract/test_offline_imports.py`) today covers the source
-fetch/update jobs, `func_resolve`, and `leaderboard.main` — **not** those jobs yet; adding each to
-`JOB_MODULES` is the cheap first step when you start on it. Beyond import, the missing *behavior*
-splits into two kinds:
+This suite is deep on **sources → resolve → leaderboard**, and now also covers **`metadata`** and
+**`curate_questions`** (see the table). Still open: `base_eval`, `nightly_update_workflow`, the
+website. The offline-import contract (`contract/test_offline_imports.py`) today covers the source
+fetch/update jobs, `func_resolve`, and `leaderboard.main` — **not** the metadata/curate/base_eval/
+nightly job modules yet; adding each to `JOB_MODULES` is the cheap first step when you start on it.
+Beyond import, job *behavior* splits into two kinds:
 
 **1. Pure-logic jobs** — same playbook we already use: `unit/` for the logic, *invariants* for the
 properties, a *golden* for the whole output. No new technique.
@@ -210,10 +219,10 @@ parsing, output schema, IO — **not the model's judgement**. Whether a category
 
 | Job | Level(s) | Technique | Status / notes |
 | --- | --- | --- | --- |
-| `curate_questions` (question sets) | `unit/` + `contract/artifacts/` | allocation **invariants** (even across sources/categories; humans ⊆ LLM; no combo for humans; totals = 1000/200) under a **seeded** RNG; JSON-schema the `*-llm.json`/`*-human.json` outputs | partial — `human_sample_questions` takes an `rng`; the stratified/LLM chain isn't seeded yet (see below) |
-| `metadata` (tag + validate, **LLM**) | `unit/` (LLM mocked) + `contract/` + `integration/` | mock the LLM → assert prompt carries the question, response **parses** to `category ∈ QUESTION_CATEGORIES` and `valid_question ∈ {True, False}`, one output row per input id; driver writes `question_metadata.jsonl` | **biggest gap — uncovered.** Categorization *correctness* is out of scope |
-| `base_eval` (naive + **LLM** forecasters) | `unit/` + `contract/artifacts/` | the naive forecast *functions* are data-in/data-out → invariants with fixed inputs (`forecast ∈ [0,1]`; naive uses `freeze_datetime_value`) — but the job does IO and the dummy forecasters use **unseeded** `np.random`, so seed or exclude those when goldening; LLM forecasters → mock boundary, parse → `forecast ∈ [0,1]`, schema the forecast-set file | uncovered |
-| `leaderboard` | `unit/leaderboard/` (done) + `contract/artifacts/` | + schema-gate the published CSV/JS; 2FE/bootstrap via the real-data path | mostly done; artifact schema + 2FE pending |
+| `curate_questions` (question sets) | `unit/curate_questions/` + `e2e/test_question_set_pipeline.py` | allocation **invariants** (`allocate_evenly`: even, capped, sums or raises); bin/validity/freeze filters; **seeded** market + data + human sampling (`random_state`); the real `driver()` builds a published set, **goldened** | **covered** (units + curate-driver golden e2e). The whole sampling chain is now seedable via `QUESTION_SET_SEED`. Follow-up: JSON-schema the `*-llm.json`/`*-human.json` artifacts |
+| `metadata` (tag + validate, **LLM**) | `unit/metadata/` (LLM mocked) + `integration/` + `e2e/` | mock the LLM → assert the response **parses** to `category ∈ QUESTION_CATEGORIES` / `valid_question ∈ {True,False}` (unknown→`"Other"`, missing→unvalidated); driver writes `question_metadata.jsonl` | **covered**. Categorization *correctness* is out of scope (validated out of band) |
+| `base_eval` (naive + **LLM** forecasters) | `unit/` + `contract/artifacts/` | the naive forecast *functions* are data-in/data-out → invariants with fixed inputs (`forecast ∈ [0,1]`; naive uses `freeze_datetime_value`) — but the job does IO and the dummy forecasters use **unseeded** `np.random`, so seed or exclude those when goldening; LLM forecasters → mock boundary, parse → `forecast ∈ [0,1]`, schema the forecast-set file | uncovered (incoming PR will change this job) |
+| `leaderboard` | `unit/leaderboard/` + `integration/test_leaderboard_compile.py` + `e2e/test_resolution_pipeline.py` | scoring/ordering (units + resolution e2e golden); read→filter→compile seam (`download_and_compile`, integration); **2FE + bootstrap** on a real-data-shaped fixture, **goldened** (`test_two_way_fixed_effects.py`); artifact serializers (`write_leaderboard_js_file_*`) unit-tested | **covered** for scoring + artifacts + compile + 2FE. Follow-up: schema-gate the published CSV/JS |
 | `nightly_update_workflow` (manager/worker) | `unit/` | the **DAG/scheduling** logic with a fake job runner (what blocks on what, what parallelizes); real Cloud Run is GCP | out of scope for offline; logic-only |
 | `www.forecastbench.org` (Jekyll) | — | site build (`bundle exec jekyll build`) in a **separate CI lane** | not Python; not part of `make test` |
 
@@ -223,16 +232,17 @@ forecast set, the leaderboard CSV) rather than hand-asserting every cell.
 
 ## Known follow-ups
 
-- **Sampling seeding.** `leaderboard.generate_simulated_leaderboards` takes a per-replicate `seed`,
-  and `curate_questions.human_sample_questions` takes an `rng`. The stratified / LLM (bin +
-  category) sampling chain is **not yet** seeded — a follow-up that needs threading `random_state`
-  through `sample_market_questions`/`stratified_sample_questions` plus bin-fixture tests.
+- **Sampling seeding — done.** The whole sampling surface is now seedable: `curate_questions`
+  threads a `random_state` through `human_sample_questions` / `llm_sample_questions` /
+  `sample_market_questions` / `stratified_sample_questions` (driver opts in via `QUESTION_SET_SEED`),
+  and `leaderboard.generate_simulated_leaderboards` takes a per-replicate `seed`. Both have golden /
+  determinism tests.
 - **Pandera `Check` tightening.** The frame-level invariants (value ∈ [0,1]; no pre-due resolution
   date) are asserted at the contract layer. Promoting them into the prod `_schemas.py` models as
   `Check`s is deferred until validated against real prod data (a too-strict schema on unseen data
   would break the nightly).
 - **Public-artifact schemas.** Leaderboard CSV/JS and question-set outputs don't yet have schema
-  gates (`contract/artifacts/`).
-- **2FE / bootstrap scoring** is exercised by the real-data path, not synthetic unit data (the
-  `pyfixest` regression is fragile on tiny inputs); the `unit/leaderboard` scoring tests use the
-  non-regression scorers.
+  gates (`contract/artifacts/`) — the goldens pin *values*, not a *schema* contract.
+- **2FE / bootstrap scoring — covered.** `unit/leaderboard/test_two_way_fixed_effects.py` exercises
+  the real ranking method on a real-data-shaped fixture (the `unit/leaderboard` scoring tests still
+  use the non-regression scorers, since `pyfixest` is fragile on tiny inputs).
