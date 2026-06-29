@@ -1,8 +1,10 @@
 """Offline-import contract: the covered job modules import with no GCP/network/secrets.
 
 The covered set is listed below (``JOB_MODULES`` + ``IMPORT_TIME_SIDE_EFFECT_MODULES``): the source
-fetch/update jobs, ``func_resolve``, ``leaderboard.main``, and the lazy helpers — not yet
-curate/metadata/base_eval/nightly. This locks in the Layer 0 refactor (lazy keys, lazy LLM clients,
+fetch/update jobs, ``func_resolve``, ``metadata`` (tag + validate), ``curate_questions``,
+``leaderboard.main``, and the lazy helpers. (Still out: ``base_eval`` and ``nightly_update_workflow``,
+which aren't covered elsewhere yet either.) This locks in the Layer 0 refactor (lazy keys, lazy LLM
+clients,
 call-time env, call-time mount, deferred leaderboard CSV read). If any of these regress to doing
 work at import time, the corresponding test here fails — the contract is executable, not
 aspirational.
@@ -29,6 +31,7 @@ COLD_IMPORT_MODULES = [
     "orchestration.func_resolve.main",  # registry -> all 9 sources -> slack -> keys
     "orchestration.func_infer_fetch.main",  # a key source's fetch job
     "leaderboard.main",  # model_release_dates.csv + model_eval chain
+    "curate_questions.create_question_set.main",  # question_curation -> all sources' intros
 ]
 
 # Job entry points + the heavy shared modules that historically did work at import time.
@@ -44,6 +47,9 @@ JOB_MODULES = [
     "orchestration.func_yfinance_fetch.main",
     "orchestration.func_yfinance_update.main",
     "orchestration.func_resolve.main",
+    "metadata.tag_questions.main",
+    "metadata.validate_questions.main",
+    "curate_questions.create_question_set.main",
 ]
 
 IMPORT_TIME_SIDE_EFFECT_MODULES = [
