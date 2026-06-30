@@ -14,9 +14,14 @@ Divergences are handled with a narrower test *in this file* (see README "integra
 - **Stateless fetch.** ``manifold``/``metaculus`` fetch drivers call ``fetch()`` with no args
   (they don't read the question bank), so the "passes the existing bank" assertion is scoped to
   ``BANK_READING_FETCH`` only.
-- **Pure update.** Only ``polymarket.update()`` makes no network calls, so it is run *unmocked*
-  in ``TestPolymarketUpdateRealChain`` to prove the whole read -> update -> write chain for real;
-  the other four are covered by the mocked, parametrized wiring test.
+- **Pure update.** ``polymarket`` is the only source that front-loads its resolution data
+  (``historical_prices``) into ``fetch()``, so its ``update()`` merely reshapes already-fetched
+  data and makes no network calls. It is therefore run *unmocked* in
+  ``TestPolymarketUpdateRealChain`` to prove the whole read -> update -> write chain for real. The
+  other four pull per-question resolution data via the network *inside* ``update()``, so they
+  can't run offline unmocked; they are covered by the mocked, parametrized wiring test here, and
+  their ``update()`` assembly is exercised offline in ``unit/sources/`` and
+  ``contract/test_update_conformance.py``.
 """
 
 from unittest.mock import patch
@@ -123,11 +128,13 @@ class TestUpdateDriverWiring:
 
 
 class TestPolymarketUpdateRealChain:
-    """Divergence: polymarket.update() is the only pure update, so run it unmocked.
+    """Divergence: polymarket's update() is the only network-free update, so run it unmocked.
 
-    This proves the full read -> update -> write chain end to end (real update + real IO), which the
-    mocked parametrized test above cannot. The other four sources fetch inside update(), so their
-    update() behaviour is covered offline in contract/test_update_conformance.py instead.
+    Polymarket front-loads its resolution data (``historical_prices``) into ``fetch()``, so
+    ``update()`` only reshapes already-fetched data. This proves the full read -> update -> write
+    chain end to end (real update + real IO), which the mocked parametrized test above cannot. The
+    other four sources pull resolution data via the network inside update(), so their update()
+    behaviour is covered offline in contract/test_update_conformance.py (and unit/sources/) instead.
     """
 
     def test_writes_questions_and_resolution_files(self, local_bucket):

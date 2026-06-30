@@ -1,14 +1,21 @@
 """Contract: every implemented source's ``update()`` output conforms to the data schemas.
 
 Registry-parametrized over sources with an implemented ``update()`` (see ``tests/_sources.py``).
-``update()`` reaches the network in four of five
-sources, so the offline adapter (``offline_update_case``) patches the resolution-building seam;
-this test asserts update()'s *assembly* contract — the question frame conforms to
-``QuestionFrame`` with exactly the persisted columns, and each resolution file conforms to
-``ResolutionFrame``.
+``update()`` reaches the network in four of five sources, so the offline adapter
+(``offline_update_case``) patches the resolution-building seam (``_build_resolution_df``); this
+test asserts update()'s *assembly* contract, not its resolution *content*.
 
-Schemas are ``strict=False`` (see ``_schemas.py``), so ``validate()`` alone won't catch a leaked
-column — hence the explicit column-set assertion alongside it.
+The two assertions are of unequal strength — read them that way:
+
+- **dfq columns (load-bearing).** ``update()`` assembles the question frame and chooses its
+  columns, so pinning it to exactly ``QUESTION_FILE_COLUMNS`` catches real column leaks/drift.
+  Schemas are ``strict=False`` (see ``_schemas.py``), so ``validate()`` alone won't catch a leaked
+  column — hence the explicit column-set assertion alongside it.
+- **resolution files (packaging check only).** ``_build_resolution_df`` is stubbed to return a
+  frame that *already* conforms, so this half does not validate real resolution construction — it
+  only proves ``update()`` keys the resolution dict and passes the frame through without mangling
+  its columns. Resolution *content* (the real ``_build_resolution_df`` logic) is covered in
+  ``unit/sources/``.
 """
 
 from contextlib import ExitStack
