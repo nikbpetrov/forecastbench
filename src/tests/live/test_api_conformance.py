@@ -6,34 +6,176 @@ schedule or manually::
 
     make test ARGS="-m live"
 
-These assert a *permissive field contract* — that the fields our source code actually consumes
-are still present — rather than byte equality (live data changes daily). A failure means an
-external API dropped or renamed a field we depend on. Live tests only read; they never write.
+**Approach: call the source's own request methods and validate their output**, rather than
+re-building the requests in the test. A dropped/renamed field then surfaces through the real code
+path — usually as a ``KeyError`` inside the source's parser (``_transform_question``,
+``_is_market_binary``, the search-endpoint filter) — so there is nothing to keep in sync. We call
+the granular private methods (``_call_search_endpoint``, ``_get_market``,
+``_fetch_questions_from_api``, ``_fetch_historical_prices``, ``_get_sp500_tickers``), never the
+heavyweight public ``fetch()``/``update()`` (full pagination + per-item network + sleeps).
 
-Currently covers the keyless Polymarket Gamma endpoint. Keyed sources (infer, metaculus) and the
-Manifold search endpoint can be added the same way, guarded to skip when credentials/params are
-unavailable.
+The lone re-created request is Polymarket *discovery*: its real method paginates every active
+market with per-page sleeps and per-market CLOB calls, so we issue one bounded Gamma request and
+then route the markets through the real static parsers.
+
+Keyless endpoints (polymarket, manifold, yfinance via Yahoo + Wikipedia) always run. Keyed
+endpoints (metaculus, infer) get their API key from ``helpers.keys`` via ``_resolve_secret_or_skip``
+— a real Secret Manager lookup once the fake-secrets guard is lifted — and *skip* (not fail) when
+no credential is available (local dev / CI without GCP). That helper is the single seam to extend
+later with other providers (e.g. a ``.env`` fallback). Live tests only read; they never write.
 """
+
+from datetime import date, timedelta
 
 import pytest
 import requests
 
 pytestmark = pytest.mark.live
 
-# The fields polymarket.py reads off each Gamma market (conditionId/question/outcomes/
-# clobTokenIds/endDate); see sources/polymarket.py transform + _build_resolution_df.
-_POLYMARKET_CONSUMED_FIELDS = ("conditionId", "question", "outcomes", "clobTokenIds")
+_HTTP_TIMEOUT = 30
+# Generous resolution-window cutoff so search calls return today's eligible markets.
+_SEARCH_WINDOW_DAYS = 365
+
+
+def _resolve_secret_or_skip(attr_name: str) -> str:
+    """Resolve a credential via ``helpers.keys``, or ``pytest.skip`` when it is unavailable.
+
+    Live tests lift the fake-secrets guard, so ``keys.<ATTR>`` triggers a real Secret Manager
+    lookup (and memoizes it). When GCP credentials or the secret are missing the lookup raises;
+    we skip rather than fail, so the keyless tests still run. This is the single place to add
+    other credential providers later (e.g. read from a ``.env``).
+
+    Args:
+        attr_name (str): A ``helpers.keys`` secret attribute, e.g. ``"API_KEY_METACULUS"``.
+    """
+    from helpers import keys
+
+    if attr_name not in keys._SECRET_NAMES:
+        raise AssertionError(f"{attr_name!r} is not a known helpers.keys secret (test typo?)")
+    try:
+        value = getattr(keys, attr_name)
+    except Exception as exc:
+        pytest.skip(f"no credential for {attr_name} ({type(exc).__name__}: {exc})")
+    if not value:
+        pytest.skip(f"credential {attr_name} resolved empty")
+    return value
+
+
+def _keyed_source(source_cls, secret_attr: str):
+    """Instantiate ``source_cls`` with its ``api_key`` resolved via keys.py (or skip)."""
+    src = source_cls()
+    src.api_key = _resolve_secret_or_skip(secret_attr)
+    return src
+
+
+# ---------------------------------------------------------------------------
+# Keyless endpoints (always run)
+# ---------------------------------------------------------------------------
 
 
 def test_polymarket_gamma_markets_contract():
-    """The Polymarket Gamma /markets payload still carries the fields we parse."""
-    resp = requests.get("https://gamma-api.polymarket.com/markets?limit=20", timeout=30)
+    """Gamma /markets output still parses through Polymarket's real field consumers.
+
+    Discovery (``_fetch_active_markets_from_api``) paginates *all* active markets with per-page
+    sleeps + per-market CLOB calls, so there is no cheap method to call; this issues the one
+    re-created request in this file, then routes each market through the real static parsers
+    (``_is_market_binary``/``_get_yes_token`` ``json.loads`` ``outcomes``/``clobTokenIds``, so they
+    validate parseability, not mere presence).
+    """
+    from sources.polymarket import PolymarketSource
+
+    resp = requests.get("https://gamma-api.polymarket.com/markets?limit=50", timeout=_HTTP_TIMEOUT)
     resp.raise_for_status()
     markets = resp.json()
     assert isinstance(markets, list) and markets, "expected a non-empty list of markets"
 
+    saw_binary = False
     for market in markets:
-        for field in _POLYMARKET_CONSUMED_FIELDS:
-            assert field in market, f"Polymarket dropped consumed field {field!r}"
-        # endDate is read with a documented fallback to events[0].endDate.
+        assert "conditionId" in market, "Polymarket dropped conditionId"  # read as m['conditionId']
         assert "endDate" in market or market.get("events"), "no endDate or events fallback"
+        if PolymarketSource._is_market_binary(market):  # consumes + json.loads market['outcomes']
+            saw_binary = True
+            assert PolymarketSource._get_yes_token(market)  # consumes market['clobTokenIds']
+    assert saw_binary, "no binary market in the sample to exercise _get_yes_token"
+
+
+def test_manifold_search_and_market_contract():
+    """Run Manifold's real search + market-detail request methods against live data.
+
+    ``_call_search_endpoint`` reads id/uniqueBettorCount/totalLiquidity/closeTime on every market
+    it returns (a ``KeyError`` here = a consumed field was dropped). ``_get_market`` returns the
+    per-question dict ``update()`` reads; we validate that dict's fields directly.
+    """
+    from sources.manifold import ManifoldSource
+
+    src = ManifoldSource()
+    cutoff = date.today() + timedelta(days=_SEARCH_WINDOW_DAYS)
+    ids = src._call_search_endpoint(max_resolution_date=cutoff)
+    assert isinstance(ids, set)
+    if not ids:
+        pytest.skip("no manifold markets matched the search filters")
+
+    market = src._get_market(sorted(ids)[0])
+    for field in ("question", "textDescription", "createdTime", "closeTime", "url", "isResolved"):
+        assert field in market, f"Manifold market detail dropped consumed field {field!r}"
+
+
+def test_yfinance_sp500_and_price_contract():
+    """Run yfinance's real Wikipedia + Yahoo fetch methods against live data.
+
+    Both are the real source methods: a Wikipedia table change yields no tickers, and a dropped
+    ``Close`` column yields an empty / mis-shaped price frame — each caught below.
+    """
+    from sources.yfinance import YfinanceSource
+
+    tickers = YfinanceSource._get_sp500_tickers()
+    assert tickers, "S&P 500 Wikipedia scrape returned no tickers (table structure changed?)"
+
+    prices = YfinanceSource._fetch_historical_prices("AAPL", "1mo")
+    assert not prices.empty, "Yahoo returned no AAPL prices (the 'Close' column may be gone)"
+    assert list(prices.columns) == ["date", "value"], "price frame columns drifted"
+
+
+# ---------------------------------------------------------------------------
+# Keyed endpoints (skip when no credential is available)
+# ---------------------------------------------------------------------------
+
+
+def test_metaculus_search_and_detail_contract():
+    """Run Metaculus's real search (auth + filter fields) + detail request methods, live.
+
+    The search method reads nr_forecasters/question/cp_reveal_time/id internally; the detail dict
+    carries the fields ``update()`` indexes.
+    """
+    from sources.metaculus import MetaculusSource
+
+    src = _keyed_source(MetaculusSource, "API_KEY_METACULUS")
+    ids = src._call_search_endpoint(today=date.today())
+    assert isinstance(ids, set)
+    if not ids:
+        pytest.skip("no metaculus questions matched the search filters")
+
+    market = src._get_market(sorted(ids)[0])
+    assert "title" in market, "Metaculus detail dropped 'title'"
+    assert "resolved" in market, "Metaculus detail dropped 'resolved'"
+    assert isinstance(market.get("question"), dict), "Metaculus detail 'question' is not a dict"
+    # open_time / actual_close_time are indexed unconditionally in update(); keys must be present.
+    for field in ("open_time", "actual_close_time"):
+        assert field in market["question"], f"Metaculus detail question dropped {field!r}"
+
+
+def test_infer_questions_contract():
+    """Run INFER's real fetch method + the static ``_transform_question``, live.
+
+    Nothing is re-created here: the real fetch method issues the request and the real transform
+    consumes id/name/description/clarifications/type/answers/scoring_*/ends_at/resolved_at — a
+    dropped field raises inside ``_transform_question``.
+    """
+    from sources.infer import InferSource
+
+    src = _keyed_source(InferSource, "API_KEY_INFER")
+    questions = src._fetch_questions_from_api(status="active")
+    assert questions, "expected a non-empty list of active questions"
+
+    row = InferSource._transform_question(questions[0], "2025-01-01T00:00:00Z")
+    assert row["id"], "transform produced no id"
