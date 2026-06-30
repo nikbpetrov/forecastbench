@@ -553,3 +553,184 @@ class TestGetHistoricalForecasts:
 
         assert not df.empty
         mock_sleep.assert_called_once_with(10)
+
+
+# ---------------------------------------------------------------------------
+# Regression: _get_historical_forecasts skips malformed prediction sets
+# (bugfix in src/sources/infer.py: "Skipping prediction set" guard)
+# ---------------------------------------------------------------------------
+
+
+class TestGetHistoricalForecastsMalformedPredictions:
+    """Pin the guard that skips prediction sets whose ``predictions`` length is not 1 or 2.
+
+    Pre-fix, the loop only handled ``len == 2`` and ``len == 1`` and left ``forecast_yes``
+    unbound/stale for any other length. A malformed set as the *first* item raised
+    ``NameError``; a malformed set after a good one appended a *stale* ``forecast_yes`` carried
+    over from the previous iteration. The fix ``continue``s (and logs) on unexpected lengths.
+    """
+
+    def _mock_response(self, prediction_sets):
+        resp = Mock()
+        resp.ok = True
+        resp.json.return_value = {"prediction_sets": prediction_sets}
+        resp.raise_for_status = Mock()
+        return resp
+
+    def _malformed_set(self, created_at, n_predictions):
+        """Build a prediction set with an unexpected number of predictions (0 or 3, etc.)."""
+        prediction = {
+            "answer_name": "Yes",
+            "final_probability": 0.99,
+            "forecasted_probability": 0.99,
+            "starting_probability": 0.99,
+        }
+        return {
+            "id": 888888,
+            "type": "Forecast::OpinionPoolPredictionSet",
+            "question_id": 9999,
+            "created_at": created_at,
+            "predictions": [dict(prediction) for _ in range(n_predictions)],
+        }
+
+    @patch("sources.infer.requests.get")
+    def test_malformed_first_does_not_raise_nameerror(self, mock_get, infer_source, freeze_today):
+        """A malformed set as the FIRST item is skipped, not a NameError.
+
+        Pre-fix this raised ``NameError`` because ``forecast_yes`` was never bound before use.
+        """
+        freeze_today(date(2026, 1, 15))
+        mock_get.side_effect = [
+            self._mock_response(
+                [
+                    self._malformed_set("2026-01-09T12:00:00.000Z", 0),  # malformed, skipped
+                    make_infer_prediction_set("2026-01-10T12:00:00.000Z", 0.4),
+                    make_infer_prediction_set("2026-01-12T14:00:00.000Z", 0.6),
+                ]
+            ),
+            self._mock_response([]),
+        ]
+
+        df = infer_source._get_historical_forecasts(None, "200")
+
+        # No crash, and the well-formed sets still produced rows.
+        assert not df.empty
+        # The malformed date (the 9th) must not appear as a seeded value; the series starts at
+        # the first well-formed forecast (the 10th, value 0.4).
+        ordered = df.sort_values("date")
+        assert float(ordered["value"].iloc[0]) == 0.4
+
+    @patch("sources.infer.requests.get")
+    def test_malformed_middle_does_not_append_stale(self, mock_get, infer_source, freeze_today):
+        """A malformed set is skipped, not appended carrying the prior set's stale value.
+
+        The sets are ordered so the stale value differs from the forward-filled value at the
+        malformed set's date (the 11th):
+
+          * good B (the 12th, value 0.6) -> binds ``forecast_yes`` to 0.6
+          * malformed M (the 11th, 3 predictions) -> pre-fix appends (11th, *stale* 0.6)
+          * good A (the 10th, value 0.4)
+
+        After sorting by date and forward-filling, the 11th should carry 0.4 (carried forward from
+        the 10th). Pre-fix it carried the stale 0.6 leaked from set B; the fix ``continue``s so the
+        11th is just a forward-fill of the 10th.
+        """
+        freeze_today(date(2026, 1, 15))
+        mock_get.side_effect = [
+            self._mock_response(
+                [
+                    make_infer_prediction_set("2026-01-12T14:00:00.000Z", 0.6),
+                    self._malformed_set("2026-01-11T12:00:00.000Z", 3),  # malformed, skipped
+                    make_infer_prediction_set("2026-01-10T12:00:00.000Z", 0.4),
+                ]
+            ),
+            self._mock_response([]),
+        ]
+
+        df = infer_source._get_historical_forecasts(None, "200")
+
+        assert not df.empty
+        by_date = {d: round(float(v), 4) for d, v in zip(df["date"], df["value"])}
+        the_11th = pd.Timestamp("2026-01-11", tz="UTC")
+        # Forward-filled from the 10th (0.4), NOT the stale 0.6 leaked from the malformed set.
+        assert by_date[the_11th] == 0.4
+        # Only the two well-formed forecast values appear anywhere in the series.
+        assert set(by_date.values()) == {0.4, 0.6}
+
+
+# ---------------------------------------------------------------------------
+# Regression: _build_resolution_df up-to-date short-circuit uses MAX date,
+# not last-row date (bugfix in src/sources/infer.py: ``.max()`` vs ``.iloc[-1]``)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildResolutionDfUpToDateUsesMaxDate:
+    """Pin that the up-to-date short-circuit keys off the MAX date, regardless of row order.
+
+    Pre-fix the check used ``existing_df["date"].iloc[-1]`` (last row by storage order). If rows
+    were stored out of date order, an up-to-date file could be mis-classified as stale (or a stale
+    file as up-to-date). The fix uses ``pd.to_datetime(existing_df["date"]).max()``.
+    """
+
+    def _question(self, **overrides):
+        base = {
+            "id": "200",
+            "nullify_question": False,
+            "market_info_resolution_datetime": "N/A",
+            "probability": 0.6,
+        }
+        base.update(overrides)
+        return base
+
+    @patch.object(InferSource, "_get_historical_forecasts")
+    def test_short_circuits_when_max_recent_but_last_row_old(
+        self, mock_hist, infer_source, freeze_today
+    ):
+        """Out-of-order rows: last row is OLD but an earlier row is >= yesterday -> short-circuit.
+
+        Pre-fix, ``.iloc[-1]`` saw the old last row (2024-06-01) and wrongly fetched. The fix uses
+        ``.max()`` (2026-01-14 == yesterday) and short-circuits, returning ``existing_df`` unchanged.
+        """
+        freeze_today(date(2026, 1, 15))
+        # Give the mock a valid frame so that, against the pre-fix ``.iloc[-1]`` code, the failure
+        # surfaces as the ``assert_not_called`` below rather than an incidental pandas error.
+        mock_hist.return_value = make_resolution_df(
+            [{"id": "200", "date": "2026-01-14", "value": 0.6}]
+        )
+        existing = make_resolution_df(
+            [
+                {"id": "200", "date": "2026-01-14", "value": 0.6},  # latest date, NOT last row
+                {"id": "200", "date": "2024-06-01", "value": 0.5},  # last row, OLD
+            ]
+        )
+        q = self._question()
+        df = infer_source._build_resolution_df(q, resolved=False, existing_df=existing)
+
+        mock_hist.assert_not_called()
+        assert df.equals(existing)
+
+    @patch.object(InferSource, "_get_historical_forecasts")
+    def test_does_not_short_circuit_when_max_is_stale(self, mock_hist, infer_source, freeze_today):
+        """Converse: max date < yesterday -> does NOT short-circuit; fetches fresh data.
+
+        Even with a recent-looking last row, the decision keys off the MAX date. Here every date
+        is before yesterday, so ``.max()`` is stale and ``_get_historical_forecasts`` is called.
+        """
+        freeze_today(date(2026, 1, 15))
+        mock_hist.return_value = make_resolution_df(
+            [
+                {"id": "200", "date": "2024-06-01", "value": 0.5},
+                {"id": "200", "date": "2026-01-14", "value": 0.7},
+            ]
+        )
+        existing = make_resolution_df(
+            [
+                {"id": "200", "date": "2024-06-01", "value": 0.5},
+                {"id": "200", "date": "2024-06-02", "value": 0.55},  # last row, still stale
+            ]
+        )
+        q = self._question()
+        df = infer_source._build_resolution_df(q, resolved=False, existing_df=existing)
+
+        mock_hist.assert_called_once()
+        assert not df.empty

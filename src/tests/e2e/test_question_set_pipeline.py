@@ -256,5 +256,7 @@ def test_curate_driver_builds_question_set(local_bucket, monkeypatch):
     assert set(human["id"]) <= set(llm["id"])
 
     # --- Golden: freeze the produced question-set rows (scalar columns only) ---
-    check_golden("question_set_llm", llm, key=["source", "id"], cols=_CURATE_GOLDEN_COLS)
-    check_golden("question_set_human", human, key=["source", "id"], cols=_CURATE_GOLDEN_COLS)
+    check_golden("question_set_llm", llm, key=["source", "id"], cols=_CURATE_GOLDEN_COLS, rtol=0)
+    check_golden(
+        "question_set_human", human, key=["source", "id"], cols=_CURATE_GOLDEN_COLS, rtol=0
+    )

@@ -70,14 +70,11 @@ def make_resolution_df(rows: list[dict]) -> pd.DataFrame:
     return df
 
 
-def make_acled_resolution_df(
-    rows: list[dict], event_columns: list[str] | None = None
-) -> pd.DataFrame:
+def make_acled_resolution_df(rows: list[dict]) -> pd.DataFrame:
     """Build a DataFrame matching AcledResolutionFrame.
 
     Args:
         rows: list of dicts with 'country', 'event_date', and event type columns.
-        event_columns: list of event type column names (e.g. ['Battles', 'Riots']).
     """
     df = pd.DataFrame(rows)
     df["event_date"] = pd.to_datetime(df["event_date"])

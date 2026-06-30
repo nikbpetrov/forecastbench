@@ -5,15 +5,21 @@
 ``random_state``, which is what makes a deterministic question-set e2e (and golden) possible.
 """
 
+from datetime import datetime
+from unittest.mock import patch
+
 import numpy as np
 import pandas as pd
 
 from curate_questions.create_question_set.main import (
     drop_invalid_questions,
     drop_missing_freeze_datetime,
+    drop_questions_that_resolve_too_soon,
     human_sample_questions,
     llm_sample_questions,
+    market_resolves_before_forecast_due_date,
 )
+from helpers import question_curation
 from tests.factories import make_question_df
 
 
@@ -63,6 +69,45 @@ def test_drop_missing_freeze_datetime():
     )
     out = drop_missing_freeze_datetime(dfq)
     assert out["id"].tolist() == ["a"]
+
+
+class TestResolveTooSoonFilter:
+    """The market resolve-too-soon filter + its date math (no negative case lives in the e2e)."""
+
+    # all_forecasts_due = FREEZE_DATETIME + FREEZE_WINDOW_IN_DAYS, at 23:59:59 → 2025-01-11 EOD.
+    _FREEZE = patch.object(question_curation, "FREEZE_DATETIME", datetime(2025, 1, 1))
+    _WINDOW = patch.object(question_curation, "FREEZE_WINDOW_IN_DAYS", 10)
+
+    def test_market_resolves_before_due_date_boundary(self):
+        with self._FREEZE, self._WINDOW:
+            # Closes before all-forecasts-due → too soon.
+            assert market_resolves_before_forecast_due_date(datetime(2025, 1, 5)) is True
+            # Same calendar day but before 23:59:59 → still too soon.
+            assert market_resolves_before_forecast_due_date(datetime(2025, 1, 11, 12)) is True
+            # Comfortably after → not too soon.
+            assert market_resolves_before_forecast_due_date(datetime(2025, 1, 20)) is False
+            assert market_resolves_before_forecast_due_date(datetime(2025, 3, 12)) is False
+
+    def test_drop_markets_that_close_too_soon(self):
+        dfq = pd.DataFrame(
+            {
+                "id": ["soon", "ok"],
+                "market_info_close_datetime": ["2025-01-05T00:00:00", "2025-03-12T00:00:00"],
+            }
+        )
+        with self._FREEZE, self._WINDOW:
+            out = drop_questions_that_resolve_too_soon("manifold", dfq)
+        assert out["id"].tolist() == ["ok"]  # the too-soon market is dropped
+
+    def test_drop_data_questions_with_empty_or_na_horizons(self):
+        dfq = pd.DataFrame(
+            {
+                "id": ["keep", "empty", "na"],
+                "forecast_horizons": [[7, 30], [], "N/A"],
+            }
+        )
+        out = drop_questions_that_resolve_too_soon("fred", dfq)
+        assert out["id"].tolist() == ["keep"]  # empty / "N/A" horizons dropped
 
 
 class TestHumanSampleQuestions:

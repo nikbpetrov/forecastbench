@@ -237,13 +237,20 @@ def test_full_pipeline(nullified, local_bucket, freeze_today):
     # The anchors above pin the *intent*; these pin everything else so any drift surfaces as a
     # reviewable CSV diff. See tests/_golden.py.
     scenario = "nullified" if nullified else "base"
+    # NB: the nullified golden is byte-identical to base by construction — the nullified row is
+    # dropped, so the terminal frames match. The *nullification itself* is proven by the anchor
+    # above (the dropped id is absent from `resolved`/`combined`), not by this golden; the golden is
+    # a redundant net for that scenario, kept only for symmetry.
+    # Pure pandas/numpy arithmetic (no pyfixest), so the scores are exact across platforms → pin
+    # tightly (rtol=0) to actually catch sub-1e-5 score drift the default tolerance would absorb.
     check_golden(
         f"e2e_resolved_{scenario}",
         resolved,
         key=["id", "resolution_date"],
         cols=["id", "source", "resolution_date", "resolved", "resolved_to"],
+        rtol=0,
     )
-    check_golden(f"e2e_leaderboard_{scenario}", lb, key="model_pk")
+    check_golden(f"e2e_leaderboard_{scenario}", lb, key="model_pk", rtol=0)
 
 
 def test_full_pipeline_is_deterministic(local_bucket, freeze_today):

@@ -168,6 +168,45 @@ class TestTagDriverStatefulBehavior:
         assert mock_llm.call_count == 0
 
 
+class TestValidateDriverWikipedia:
+    """Wikipedia is the only data source with per-id invalidation: it auto-validates, then flips a
+    computed id set (``transform_id_mapping`` ∪ ``IDS_TO_NULLIFY``) to ``valid_question=False``,
+    bypassing the LLM entirely. A regression in that id-set construction would otherwise pass.
+    """
+
+    def test_nullified_ids_are_invalid_others_valid_and_llm_is_bypassed(self, local_bucket):
+        local_bucket.seed_metadata([])
+        _seed_bank(
+            local_bucket,
+            "wikipedia",
+            [
+                {"id": "wiki_mapped", "question": "Q-mapped?"},  # in transform_id_mapping → invalid
+                {"id": "wiki_nullify", "question": "Q-nullify?"},  # in IDS_TO_NULLIFY → invalid
+                {"id": "wiki_ok", "question": "Q-ok?"},  # neither → valid
+            ],
+        )
+
+        with patch.object(
+            validate.question_curation, "FREEZE_QUESTION_SOURCES", {"wikipedia": {}}
+        ), patch.object(
+            validate.wikipedia, "transform_id_mapping", {"wiki_mapped": "x"}
+        ), patch.object(
+            validate.wikipedia, "IDS_TO_NULLIFY", [{"id": "wiki_nullify"}]
+        ), patch.object(
+            validate.model_eval, "get_response_from_model"
+        ) as mock_llm, patch.object(
+            validate.time, "sleep"
+        ):
+            validate.driver(None)
+
+        meta = _read_metadata(local_bucket)
+        valid = dict(zip(meta["id"].astype(str), meta["valid_question"]))
+        assert valid["wiki_mapped"] is False
+        assert valid["wiki_nullify"] is False
+        assert valid["wiki_ok"] is True
+        assert mock_llm.call_count == 0  # wikipedia is a data source → never hits the LLM
+
+
 class TestValidateDriverStatefulBehavior:
     """The validate driver is likewise incremental: an existing verdict is never re-validated."""
 

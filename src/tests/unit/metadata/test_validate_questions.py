@@ -49,6 +49,30 @@ def test_validate_parses_each_verdict():
     assert by_id["ambiguous"] is True
 
 
+def test_incidental_ok_substring_does_not_override_an_explicit_flag():
+    # Regression: the parser used a loose ``"ok" in end_resp`` checked before ``"flag"``, so a
+    # verdict whose prose contained "ok" inside another word (looks/book/broke) would silently pass
+    # a question the model meant to flag. Word-boundary + first-token matching must flag it.
+    df = _to_validate(
+        [
+            {"id": "sneaky_flag", "question": "Q-sneaky"},
+            {"id": "ok_then_words", "question": "Q-okwords"},
+        ]
+    )
+
+    def fake_model(model_name, prompt, max_tokens=None):
+        if "Q-sneaky" in prompt:
+            return "Classification:\nThis looks broken and inappropriate, flag"
+        return "Classification: ok, this is not a flag"  # first standalone token is 'ok'
+
+    with patch.object(validate.model_eval, "get_response_from_model", side_effect=fake_model):
+        out = validate.validate_questions(df)
+
+    by_id = dict(zip(out["id"], out["valid_question"]))
+    assert by_id["sneaky_flag"] is False  # 'flag' wins; the incidental 'ok' in "looks" is ignored
+    assert by_id["ok_then_words"] is True  # explicit 'ok' first → valid
+
+
 def test_model_error_defaults_to_valid():
     df = _to_validate([{"id": "boom", "question": "Q-boom"}])
 

@@ -4,9 +4,13 @@ These run against a ``local_bucket`` (BUCKET_MOUNT_POINT temp tree) — the real
 no GCP — and pin the empty-resolution-file subtleties the docstrings warn about.
 """
 
+import json
+from unittest.mock import patch
+
 import pandas as pd
 
-from orchestration import _source_io
+from helpers import git
+from orchestration import _io, _source_io
 
 
 class TestWriteFetchOutput:
@@ -73,6 +77,106 @@ class TestLoadExistingResolutionFiles:
     def test_missing_id_silently_skipped(self, local_bucket):
         files = _source_io.load_existing_resolution_files("infer", ids=["nope"])
         assert files == {}
+
+
+class TestUploadResolutionSet:
+    """``upload_resolution_set`` builds the public resolution JSON; only GCS/git are mocked.
+
+    Its serialization is fragile: ``direction.apply(len)`` assumes a sized object and
+    ``resolution_date.dt.strftime`` assumes a datetime dtype. Pin both so a dtype regression
+    (e.g. resolution_date arriving as str) is caught, since the real producer is otherwise only
+    ever mocked.
+    """
+
+    def test_serializes_direction_and_dates(self, local_bucket, tmp_path):
+        df = pd.DataFrame(
+            [
+                {
+                    "id": "q1",
+                    "source": "metaculus",
+                    "direction": (),  # empty → normalized to null
+                    "resolution_date": pd.Timestamp("2025-01-31"),
+                    "resolved_to": 1.0,
+                    "resolved": True,
+                },
+                {
+                    "id": "q2",
+                    "source": "acled",
+                    "direction": ("Battles", 1),  # non-empty → preserved
+                    "resolution_date": pd.Timestamp("2025-02-15"),
+                    "resolved_to": 0.0,
+                    "resolved": True,
+                },
+            ]
+        )
+        with patch.object(_io.gcp.storage, "upload"), patch.object(
+            git, "clone_and_push_files"
+        ), patch.object(_io.keys, "get_secret_that_may_not_exist", return_value=None):
+            _io.upload_resolution_set(df, "2025-09-09", "2025-09-09-llm.json")
+
+        written = json.loads(open("/tmp/2025-09-09_resolution_set.json").read())
+        assert written["forecast_due_date"] == "2025-09-09"
+        assert written["question_set"] == "2025-09-09-llm.json"
+        by_id = {r["id"]: r for r in written["resolutions"]}
+        # Empty direction → null; non-empty → preserved (JSON list).
+        assert by_id["q1"]["direction"] is None
+        assert by_id["q2"]["direction"] == ["Battles", 1]
+        # Datetime resolution_date → YYYY-MM-DD strings.
+        assert by_id["q1"]["resolution_date"] == "2025-01-31"
+        assert by_id["q2"]["resolution_date"] == "2025-02-15"
+
+
+class TestReadForecastFile:
+    """``read_forecast_file`` must SKIP (return None) malformed files, never raise."""
+
+    def _write(self, tmp_path, payload: dict):
+        path = tmp_path / "forecast.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return str(path)
+
+    def test_missing_question_set_returns_none_not_typeerror(self, tmp_path):
+        # Regression: question_set absent → the date regex used to run on None and raise TypeError,
+        # aborting the whole resolve job. It must return None so the file is skipped.
+        path = self._write(
+            tmp_path,
+            {
+                "organization": "OrgA",
+                "model": "ModelA",
+                "model_organization": "OrgA",
+                "forecasts": [{"id": "q1", "source": "fred", "forecast": 0.5}],
+                # no "question_set"
+            },
+        )
+        assert _io.read_forecast_file(path) is None
+
+    def test_question_set_without_a_date_returns_none(self, tmp_path):
+        path = self._write(
+            tmp_path,
+            {
+                "organization": "OrgA",
+                "model": "ModelA",
+                "model_organization": "OrgA",
+                "question_set": "no-date-here.json",
+                "forecasts": [{"id": "q1", "source": "fred", "forecast": 0.5}],
+            },
+        )
+        assert _io.read_forecast_file(path) is None
+
+    def test_well_formed_file_is_read(self, tmp_path):
+        path = self._write(
+            tmp_path,
+            {
+                "organization": "OrgA",
+                "model": "ModelA",
+                "model_organization": "OrgA",
+                "question_set": "2025-01-01-llm.json",
+                "forecasts": [{"id": "q1", "source": "fred", "forecast": 0.5}],
+            },
+        )
+        data = _io.read_forecast_file(path)
+        assert data is not None
+        assert data["question_set"] == "2025-01-01-llm.json"
+        assert len(data["df"]) == 1  # the forecasts frame is attached
 
 
 class TestUploadResolutionFiles:

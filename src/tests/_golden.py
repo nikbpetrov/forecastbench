@@ -65,6 +65,8 @@ def check_golden(
     *,
     key,
     cols: Sequence[str] | None = None,
+    rtol: float = 1e-5,
+    atol: float = 1e-9,
 ) -> None:
     """Assert ``df`` matches the committed golden ``<name>.csv`` (or write it under UPDATE_GOLDEN=1).
 
@@ -74,6 +76,12 @@ def check_golden(
         key (str | Sequence[str]): Column(s) to sort by for a stable row order.
         cols (Sequence[str] | None): Restrict to these columns; drop volatile or non-scalar ones
             (e.g. tuple columns that don't round-trip through CSV).
+        rtol (float): Relative float tolerance. The default ``1e-5`` (``assert_frame_equal``'s
+            default) is deliberately permissive — appropriate for BLAS/pyfixest-backed values
+            (2FE/bootstrap) that vary at the ~1e-6 level across platforms. For fully deterministic
+            frames (pure pandas/numpy arithmetic), pass ``rtol=0`` so only ``atol`` governs and small
+            score drift is actually caught.
+        atol (float): Absolute float tolerance (default ``1e-9``, matching the round-to-9-dp canon).
     """
     canon = _canonicalize(df, key, cols)
     path = GOLDEN_DIR / f"{name}.csv"
@@ -100,4 +108,4 @@ def check_golden(
     buf.seek(0)
     actual = pd.read_csv(buf)
     expected = pd.read_csv(path)
-    pd.testing.assert_frame_equal(actual, expected, check_dtype=False, atol=1e-9)
+    pd.testing.assert_frame_equal(actual, expected, check_dtype=False, rtol=rtol, atol=atol)

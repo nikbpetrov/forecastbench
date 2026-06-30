@@ -114,3 +114,22 @@ class TestCombineForecastingRounds:
         feb = get_df_info(_forecast_rows(), org, "2025-02-01")
         combined = combine_forecasting_rounds([jan, feb])
         assert (combined["first_forecast_due_date"] == date(2025, 1, 1)).all()
+
+    def test_no_duplicate_model_pk_question_pk_after_combine(self):
+        # The scoring math keys on (model_pk, question_pk); a collision would double-count a
+        # question. Two models × two rounds with identical question ids per round must stay unique,
+        # because question_pk is date-prefixed by the forecast due date.
+        orgs = [
+            {"organization": "OrgA", "model": "ModelA", "model_organization": "OrgA"},
+            {"organization": "OrgB", "model": "ModelB", "model_organization": "OrgB"},
+        ]
+        entries = [
+            get_df_info(_forecast_rows(), org, due)
+            for org in orgs
+            for due in ("2025-01-01", "2025-02-01")
+        ]
+        combined = combine_forecasting_rounds(entries)
+        assert not combined.duplicated(subset=["model_pk", "question_pk"]).any()
+        # The same question id across two rounds yields two distinct (date-prefixed) pks per model.
+        d1_per_model = combined[combined["id"] == "d1"].groupby("model_pk")["question_pk"].nunique()
+        assert (d1_per_model == 2).all()

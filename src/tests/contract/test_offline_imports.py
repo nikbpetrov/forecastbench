@@ -15,6 +15,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -30,8 +31,10 @@ _MISSING = object()
 COLD_IMPORT_MODULES = [
     "orchestration.func_resolve.main",  # registry -> all 9 sources -> slack -> keys
     "orchestration.func_infer_fetch.main",  # a key source's fetch job
-    "leaderboard.main",  # model_release_dates.csv + model_eval chain
+    "leaderboard.main",  # deferred model_release_dates.csv read (does NOT import model_eval)
     "curate_questions.create_question_set.main",  # question_curation -> all sources' intros
+    "helpers.model_eval",  # lazy LLM clients: constructing one reads a secret, so none at import
+    "questions.fred.fetch.main",  # legacy job whose API params must not read a secret at import
 ]
 
 # Job entry points + the heavy shared modules that historically did work at import time.
@@ -50,6 +53,16 @@ JOB_MODULES = [
     "metadata.tag_questions.main",
     "metadata.validate_questions.main",
     "curate_questions.create_question_set.main",
+    # Legacy pre-refactor source jobs (still the live fetch/update path for the not-yet-refactored
+    # dataset sources). They are deployed, so their imports must be secret/network-free too.
+    "questions.fred.fetch.main",
+    "questions.fred.update_questions.main",
+    "questions.acled.fetch.main",
+    "questions.acled.update_questions.main",
+    "questions.dbnomics.fetch.main",
+    "questions.dbnomics.update_questions.main",
+    "questions.wikipedia.fetch.main",
+    "questions.wikipedia.update_questions.main",
 ]
 
 IMPORT_TIME_SIDE_EFFECT_MODULES = [
@@ -76,27 +89,58 @@ def test_module_imports_offline(module_name):
     runtime uses the other and hits real GCP. Restoring both stops that desync. It is *not* a full
     module-graph rollback (any transitively re-imported submodules stay cached) — that's fine, since
     only the evicted module's identity matters here.
+
+    Secret-purity is asserted too, not just network-purity: ``_fake_secrets`` makes a secret read
+    *succeed*, so an import that regressed to module-level ``keys.API_KEY_*`` (or an eager LLM client)
+    would import cleanly and the network guard would never fire. Two layers close that gap: a spy over
+    ``keys.get_secret`` (count must be 0) catches reads via the cached/faked resolver, and a guard on
+    ``SecretManagerServiceClient`` catches the one case the spy can't — evicting+re-importing
+    ``helpers.keys`` itself yields a *fresh* module whose own ``get_secret`` is unspied, so only the
+    lower-level client construction reveals an import-time secret read there.
     """
+    from google.cloud import secretmanager
+
+    from helpers import keys
+
     saved = sys.modules.get(module_name)
     parent_name, _, leaf = module_name.rpartition(".")
     parent = sys.modules.get(parent_name) if parent_name else None
     saved_attr = getattr(parent, leaf, _MISSING) if parent is not None else _MISSING
 
     sys.modules.pop(module_name, None)
-    try:
-        mod = importlib.import_module(module_name)
-        assert mod is not None
-    finally:
-        if saved is not None:
-            sys.modules[module_name] = saved
-        else:
-            sys.modules.pop(module_name, None)
-        if parent is not None:
-            if saved_attr is not _MISSING:
-                setattr(parent, leaf, saved_attr)
-            elif hasattr(parent, leaf):
-                # import created the attr where there was none; remove it to match the prior state.
-                delattr(parent, leaf)
+    keys._cache.clear()  # else a key cached earlier this test wouldn't re-call get_secret (miss the spy)
+    secret_reads = []
+
+    def _spy(name, *a, **k):
+        secret_reads.append(name)
+        return f"fake-{name}"
+
+    def _no_secret_client(*a, **k):
+        raise AssertionError(
+            f"{module_name} constructed a Secret Manager client at import time (read a secret)."
+        )
+
+    with patch.object(keys, "get_secret", side_effect=_spy), patch.object(
+        secretmanager, "SecretManagerServiceClient", _no_secret_client
+    ):
+        try:
+            mod = importlib.import_module(module_name)
+            assert mod is not None
+        finally:
+            if saved is not None:
+                sys.modules[module_name] = saved
+            else:
+                sys.modules.pop(module_name, None)
+            if parent is not None:
+                if saved_attr is not _MISSING:
+                    setattr(parent, leaf, saved_attr)
+                elif hasattr(parent, leaf):
+                    # import created the attr where there was none; remove it to match prior state.
+                    delattr(parent, leaf)
+    assert not secret_reads, (
+        f"{module_name} read secret(s) {secret_reads} at import time — resolve them lazily "
+        "(module __getattr__ / call-time) so importing the job touches no Secret Manager."
+    )
 
 
 @pytest.mark.parametrize("module_name", COLD_IMPORT_MODULES)
@@ -104,9 +148,10 @@ def test_module_imports_cold_in_subprocess(module_name):
     """Import the full chain in a fresh interpreter with no GCP creds.
 
     A subprocess guarantees nothing is cached, so the entire transitive import graph
-    (helpers/sources/utils, not just the leaf) re-executes. ``CLOUD_PROJECT`` is bogus and no
-    credentials are provided, so any import-time Secret Manager / GCS call would fail and the
-    subprocess would exit non-zero. A clean exit proves the chain imports fully offline.
+    (helpers/sources/utils, not just the leaf) re-executes. The same socket guard the in-process
+    suite uses is installed first, so a non-loopback connect at import raises; ``CLOUD_PROJECT`` is
+    also bogus with no credentials, so any import-time Secret Manager / GCS call would fail too.
+    Either way the subprocess exits non-zero; a clean exit proves the chain imports fully offline.
     """
     env = {
         "PATH": os.environ.get("PATH", ""),
@@ -121,8 +166,9 @@ def test_module_imports_cold_in_subprocess(module_name):
         "MPLCONFIGDIR": "/tmp/fb_mplconfig",
         "XDG_CACHE_HOME": "/tmp/fb_xdg_cache",
     }
+    code = f"from tests._harness import network; network.install(); import {module_name}"
     result = subprocess.run(
-        [sys.executable, "-c", f"import {module_name}"],
+        [sys.executable, "-c", code],
         env=env,
         capture_output=True,
         text=True,

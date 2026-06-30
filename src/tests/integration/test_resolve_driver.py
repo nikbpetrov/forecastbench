@@ -76,15 +76,23 @@ def _seed_question_sets(local_bucket) -> None:
 
 
 def _run_driver(
-    local_bucket, monkeypatch, freeze_today, forecasts: list[dict], *, eligible: bool = True
+    local_bucket,
+    monkeypatch,
+    freeze_today,
+    forecasts: list[dict],
+    *,
+    eligible: bool = True,
+    organization: str = "OrgA",
+    model: str = "ModelA",
+    model_organization: str = "OrgA",
 ) -> dict:
     """Seed inputs, patch the GCP/git seams, run the real driver, return the processed file."""
     _seed_question_sets(local_bucket)
     raw = make_raw_forecast_set(
         forecasts,
-        organization="OrgA",
-        model="ModelA",
-        model_organization="OrgA",
+        organization=organization,
+        model=model,
+        model_organization=model_organization,
         question_set=f"{_DUE}-llm.json",
         leaderboard_eligible=eligible,
     )
@@ -161,6 +169,32 @@ def test_imputes_missing_forecast(local_bucket, monkeypatch, freeze_today):
 
     fred = {r["resolution_date"][:10]: r for r in processed["forecasts"] if r["id"] == "fred1"}
     assert fred["2025-01-08"]["imputed"] is False and fred["2025-01-08"]["forecast"] == 0.7
+    assert fred["2025-01-31"]["imputed"] is True and fred["2025-01-31"]["forecast"] == 0.5
+
+
+def test_imputed_forecaster_fills_market_value_not_default(local_bucket, monkeypatch, freeze_today):
+    # The Imputed Forecaster (a ForecastBench dummy) leaves market questions unforecast; its missing
+    # MARKET forecast must be filled with market_value_on_due_date carried from resolution, NOT the
+    # 0.5 default. This is the only test that proves the column survives the real chain
+    # MarketSource._resolve -> set_resolution_dates -> impute_missing_forecasts.
+    partial = [
+        {"id": "fred1", "source": "fred", "forecast": 0.7, "resolution_date": "2025-01-08"},
+    ]  # metaculus1 and fred1@+30 omitted → both imputed
+    processed = _run_driver(
+        local_bucket,
+        monkeypatch,
+        freeze_today,
+        partial,
+        organization="ForecastBench",
+        model="Imputed Forecaster",
+        model_organization="ForecastBench",
+    )
+    (metaculus,) = [r for r in processed["forecasts"] if r["id"] == "metaculus1"]
+    assert metaculus["imputed"] is True
+    # market_value_on_due_date == the resolution value at the due date (2025-01-01 → 0.6), not 0.5.
+    assert metaculus["forecast"] == 0.6
+    # A dataset gap, by contrast, imputes to the 0.5 default even for this benchmark model.
+    fred = {r["resolution_date"][:10]: r for r in processed["forecasts"] if r["id"] == "fred1"}
     assert fred["2025-01-31"]["imputed"] is True and fred["2025-01-31"]["forecast"] == 0.5
 
 

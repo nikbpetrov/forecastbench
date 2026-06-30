@@ -113,3 +113,33 @@ def test_compile_filters_dates_eligibility_and_min_resolved(local_bucket, freeze
         all_pks |= set(e["question_pk"].astype(str))
     assert f"{_KEEP}_fred_fred1_7" in all_pks  # dataset: resolution_date − due (2025-01-08) = 7d
     assert f"{_KEEP}_metaculus_metaculus1" in all_pks  # market: no horizon component
+
+
+def test_dataset_threshold_is_enforced_independently_of_the_market_threshold(
+    local_bucket, freeze_today
+):
+    # The main test's sparse date fails BOTH thresholds, so it can't prove the dataset branch is
+    # live. Isolate it: a date with ENOUGH resolved market (1) but TOO FEW resolved dataset (1 < 2)
+    # questions must still be excluded — by the dataset threshold alone.
+    freeze_today(date(2025, 6, 1))
+    one_dataset_one_market = [
+        {"id": "fred1", "source": "fred", "resolved": True, "resolution_date": "2025-01-08"},
+        {
+            "id": "metaculus1",
+            "source": "metaculus",
+            "resolved": True,
+            "resolution_date": "2025-01-15",
+        },
+    ]
+    _seed_naive(local_bucket, _KEEP, one_dataset_one_market)
+    _seed_model(local_bucket, _KEEP, "OrgA", "ModelA", one_dataset_one_market)
+
+    with patch.object(lb, "MIN_NUM_DATASET_QUESTIONS", 2):
+        entries, valid_dates = lb.download_and_compile_processed_forecast_files(
+            bucket=env.PROCESSED_FORECAST_SETS_BUCKET,
+            min_days=50,
+            min_num_market_questions=1,  # satisfied (1 resolved market) → only dataset can exclude
+        )
+
+    assert valid_dates == []  # excluded purely by the dataset threshold
+    assert entries == []
