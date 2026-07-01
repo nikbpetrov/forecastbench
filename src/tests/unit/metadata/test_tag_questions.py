@@ -1,6 +1,6 @@
 """Unit tests for the ``metadata/tag_questions`` LLM categorizer.
 
-The LLM is a non-deterministic boundary, so we MOCK it (``model_eval.get_response_from_model``) and
+The LLM is a non-deterministic boundary, so we MOCK it (``metadata_llm.get_metadata_model_response``) and
 assert the code *around* it: that the model's raw text is parsed into a category, normalized to a
 member of ``QUESTION_CATEGORIES``, and that anything unrecognized falls back to ``"Other"``. We do
 NOT assert the model's judgement — that's validated out of band, not in ``make test``.
@@ -33,7 +33,7 @@ def test_get_categories_parses_normalizes_and_falls_back():
         ]
     )
 
-    def fake_model(model_name, prompt, max_tokens=None):
+    def fake_model(prompt, max_output_tokens=None):
         # The prompt embeds the question text, so route the canned response off it.
         if "Q-known" in prompt:
             return "Science & Tech"
@@ -43,7 +43,7 @@ def test_get_categories_parses_normalizes_and_falls_back():
             return "Politics & Governance."  # trailing period -> stripped
         return "Banana"  # not a known category -> "Other"
 
-    with patch.object(tag.model_eval, "get_response_from_model", side_effect=fake_model):
+    with patch.object(tag.metadata_llm, "get_metadata_model_response", side_effect=fake_model):
         out = tag.get_categories_from_llm(df)
 
     by_id = dict(zip(out["id"], out["category"]))
@@ -59,11 +59,11 @@ def test_already_categorized_rows_are_not_retagged():
     df = _to_tag([{"id": "fresh", "question": "Q-fresh"}, {"id": "done", "question": "Q-done"}])
     df.loc[df["id"] == "done", "category"] = "Sports"  # pre-set -> must be left alone
 
-    def fake_model(model_name, prompt, max_tokens=None):
+    def fake_model(prompt, max_output_tokens=None):
         assert "Q-done" not in prompt, "must not re-tag an already-categorized question"
         return "Science & Tech"
 
-    with patch.object(tag.model_eval, "get_response_from_model", side_effect=fake_model) as m:
+    with patch.object(tag.metadata_llm, "get_metadata_model_response", side_effect=fake_model) as m:
         out = tag.get_categories_from_llm(df)
 
     assert m.call_count == 1  # only the empty-category row was sent to the model
@@ -76,7 +76,7 @@ def test_model_error_falls_back_to_other():
     df = _to_tag([{"id": "boom", "question": "Q-boom"}])
 
     with patch.object(
-        tag.model_eval, "get_response_from_model", side_effect=RuntimeError("API down")
+        tag.metadata_llm, "get_metadata_model_response", side_effect=RuntimeError("API down")
     ):
         out = tag.get_categories_from_llm(df)
 

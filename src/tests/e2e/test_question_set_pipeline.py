@@ -30,7 +30,7 @@ from curate_questions.create_question_set.main import (
     drop_missing_freeze_datetime,
     human_sample_questions,
 )
-from helpers import constants
+from helpers import constants, question_curation
 from metadata.tag_questions import main as tag
 from metadata.validate_questions import main as validate
 from tests._golden import check_golden
@@ -51,21 +51,17 @@ _FRED = [
 def _run_metadata_jobs(local_bucket) -> pd.DataFrame:
     """Tag then validate the seeded banks (LLM mocked), writing question_metadata.jsonl."""
 
-    def fake_validate(model_name, prompt, max_tokens=None) -> str:
+    def fake_validate(prompt, max_output_tokens=None) -> str:
         return "Classification: flag" if "Inappropriate" in prompt else "Classification: ok"
 
-    with patch.object(tag.question_curation, "FREEZE_QUESTION_SOURCES", _SOURCES), patch.object(
-        tag.model_eval, "get_response_from_model", return_value="Politics & Governance"
+    with patch.object(question_curation, "FREEZE_QUESTION_SOURCES", _SOURCES), patch.object(
+        tag.metadata_llm, "get_metadata_model_response", return_value="Politics & Governance"
     ), patch.object(tag.time, "sleep"):
         tag.driver(None)
 
-    with patch.object(
-        validate.question_curation, "FREEZE_QUESTION_SOURCES", _SOURCES
-    ), patch.object(
-        validate.model_eval, "get_response_from_model", side_effect=fake_validate
-    ), patch.object(
-        validate.time, "sleep"
-    ):
+    with patch.object(question_curation, "FREEZE_QUESTION_SOURCES", _SOURCES), patch.object(
+        validate.metadata_llm, "get_metadata_model_response", side_effect=fake_validate
+    ), patch.object(validate.time, "sleep"):
         validate.driver(None)
 
     return pd.read_json(local_bucket.question_bank_dir() / constants.META_DATA_FILENAME, lines=True)

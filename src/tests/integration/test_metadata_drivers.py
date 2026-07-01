@@ -2,7 +2,7 @@
 
 These run the real ``tag_questions``/``validate_questions`` ``driver()`` IO chain — read each source's
 question bank, classify/validate, write ``question_metadata.jsonl`` back to the bucket. The LLM is
-mocked (``model_eval.get_response_from_model``) since it's a non-deterministic external boundary, and
+mocked (``metadata_llm.get_metadata_model_response``) since it's a non-deterministic external boundary, and
 ``time.sleep`` (the per-source rate-limit pause) is stubbed so the test is fast. Only the seeded
 sources contribute rows; the rest read back empty and are no-ops.
 """
@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from helpers import constants
+from helpers import constants, question_curation, wikipedia
 from metadata.tag_questions import main as tag
 from metadata.validate_questions import main as validate
 from tests.factories import make_question_df
@@ -45,8 +45,8 @@ class TestTagDriver:
 
         # Scope the driver to the seeded sources (the loop only uses the keys) — focused and fast.
         sources = {"manifold": {}, "fred": {}, "acled": {}}
-        with patch.object(tag.question_curation, "FREEZE_QUESTION_SOURCES", sources), patch.object(
-            tag.model_eval, "get_response_from_model", return_value="Science & Tech"
+        with patch.object(question_curation, "FREEZE_QUESTION_SOURCES", sources), patch.object(
+            tag.metadata_llm, "get_metadata_model_response", return_value="Science & Tech"
         ), patch.object(tag.time, "sleep"):
             tag.driver(None)
 
@@ -74,19 +74,15 @@ class TestValidateDriver:
         )
         _seed_bank(local_bucket, "fred", [{"id": "CPI", "question": "Will CPI rise?"}])
 
-        def fake_model(model_name, prompt, max_tokens=None) -> str:
+        def fake_model(prompt, max_output_tokens=None) -> str:
             assert "Will CPI rise?" not in prompt, "fred (a data source) must bypass the LLM"
             # 'bad' is flagged; everything else passes.
             return "Classification: flag" if "Inappropriate" in prompt else "Classification: ok"
 
         sources = {"manifold": {}, "fred": {}}
-        with patch.object(
-            validate.question_curation, "FREEZE_QUESTION_SOURCES", sources
-        ), patch.object(
-            validate.model_eval, "get_response_from_model", side_effect=fake_model
-        ) as mock_model, patch.object(
-            validate.time, "sleep"
-        ):
+        with patch.object(question_curation, "FREEZE_QUESTION_SOURCES", sources), patch.object(
+            validate.metadata_llm, "get_metadata_model_response", side_effect=fake_model
+        ) as mock_model, patch.object(validate.time, "sleep"):
             validate.driver(None)
 
         meta = _read_metadata(local_bucket)
@@ -108,8 +104,8 @@ class TestTagDriverStatefulBehavior:
     """
 
     def _run_tag(self, local_bucket, sources: dict, **mock_kwargs: object) -> object:
-        with patch.object(tag.question_curation, "FREEZE_QUESTION_SOURCES", sources), patch.object(
-            tag.model_eval, "get_response_from_model", **mock_kwargs
+        with patch.object(question_curation, "FREEZE_QUESTION_SOURCES", sources), patch.object(
+            tag.metadata_llm, "get_metadata_model_response", **mock_kwargs
         ) as mock_llm, patch.object(tag.time, "sleep"):
             tag.driver(None)
         return mock_llm
@@ -187,13 +183,11 @@ class TestValidateDriverWikipedia:
         )
 
         with patch.object(
-            validate.question_curation, "FREEZE_QUESTION_SOURCES", {"wikipedia": {}}
+            question_curation, "FREEZE_QUESTION_SOURCES", {"wikipedia": {}}
+        ), patch.object(wikipedia, "transform_id_mapping", {"wiki_mapped": "x"}), patch.object(
+            wikipedia, "IDS_TO_NULLIFY", [{"id": "wiki_nullify"}]
         ), patch.object(
-            validate.wikipedia, "transform_id_mapping", {"wiki_mapped": "x"}
-        ), patch.object(
-            validate.wikipedia, "IDS_TO_NULLIFY", [{"id": "wiki_nullify"}]
-        ), patch.object(
-            validate.model_eval, "get_response_from_model"
+            validate.metadata_llm, "get_metadata_model_response"
         ) as mock_llm, patch.object(
             validate.time, "sleep"
         ):
@@ -220,9 +214,9 @@ class TestValidateDriverStatefulBehavior:
         )
 
         with patch.object(
-            validate.question_curation, "FREEZE_QUESTION_SOURCES", {"manifold": {}}
+            question_curation, "FREEZE_QUESTION_SOURCES", {"manifold": {}}
         ), patch.object(
-            validate.model_eval, "get_response_from_model", return_value="Classification: ok"
+            validate.metadata_llm, "get_metadata_model_response", return_value="Classification: ok"
         ) as mock_llm, patch.object(
             validate.time, "sleep"
         ):

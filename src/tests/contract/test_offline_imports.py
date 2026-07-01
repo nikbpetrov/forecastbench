@@ -31,9 +31,9 @@ _MISSING = object()
 COLD_IMPORT_MODULES = [
     "orchestration.func_resolve.main",  # registry -> all 9 sources -> slack -> keys
     "orchestration.func_infer_fetch.main",  # a key source's fetch job
-    "leaderboard.main",  # deferred model_release_dates.csv read (does NOT import model_eval)
+    "leaderboard.main",  # leaderboard entrypoint; must import with no filesystem/GCS IO
     "curate_questions.create_question_set.main",  # question_curation -> all sources' intros
-    "helpers.model_eval",  # lazy LLM clients: constructing one reads a secret, so none at import
+    "helpers.metadata_llm",  # metadata LLM model run built lazily; importing reads no secret
     "questions.fred.fetch.main",  # legacy job whose API params must not read a secret at import
 ]
 
@@ -68,7 +68,7 @@ JOB_MODULES = [
 IMPORT_TIME_SIDE_EFFECT_MODULES = [
     "helpers.keys",
     "helpers.env",
-    "helpers.model_eval",
+    "helpers.metadata_llm",
     "leaderboard.main",
 ]
 

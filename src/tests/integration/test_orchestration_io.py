@@ -111,7 +111,7 @@ class TestUploadResolutionSet:
         )
         with patch.object(_io.gcp.storage, "upload"), patch.object(
             git, "clone_and_push_files"
-        ), patch.object(_io.keys, "get_secret_that_may_not_exist", return_value=None):
+        ), patch("helpers.keys.get_secret_that_may_not_exist", return_value=None):
             _io.upload_resolution_set(df, "2025-09-09", "2025-09-09-llm.json")
 
         written = json.loads(open("/tmp/2025-09-09_resolution_set.json").read())

@@ -62,17 +62,24 @@ def _question_bank() -> dict:
     return {"metaculus": metaculus, "fred": fred}
 
 
+# The published (GitHub dataset-repo) question sets the resolver downloads for this due date.
+# main's resolve reads these via ``_io.read_question_set_json(run_locally=False)`` — a GitHub
+# fetch — so ``_run_driver`` patches that seam to serve them offline.
+_LLM_QSET = {
+    "questions": [
+        {"id": "metaculus1", "source": "metaculus", "resolution_dates": "N/A"},
+        {"id": "fred1", "source": "fred", "resolution_dates": ["2025-01-08", "2025-01-31"]},
+    ]
+}
+_HUMAN_QSET = {
+    "questions": [{"id": "metaculus1", "source": "metaculus", "resolution_dates": "N/A"}]
+}
+
+
 def _seed_question_sets(local_bucket) -> None:
-    """Seed the llm + human question sets the resolver downloads for this forecast due date."""
-    llm = {
-        "questions": [
-            {"id": "metaculus1", "source": "metaculus", "resolution_dates": "N/A"},
-            {"id": "fred1", "source": "fred", "resolution_dates": ["2025-01-08", "2025-01-31"]},
-        ]
-    }
-    human = {"questions": [{"id": "metaculus1", "source": "metaculus", "resolution_dates": "N/A"}]}
-    local_bucket.seed_question_set(f"{_DUE}-llm.json", llm)
-    local_bucket.seed_question_set(f"{_DUE}-human.json", human)
+    """Seed the llm + human question sets into the bucket (main reads them from GitHub; patched)."""
+    local_bucket.seed_question_set(f"{_DUE}-llm.json", _LLM_QSET)
+    local_bucket.seed_question_set(f"{_DUE}-human.json", _HUMAN_QSET)
 
 
 def _run_driver(
@@ -108,6 +115,16 @@ def _run_driver(
         stack.enter_context(patch.object(func_resolve._io, "load_hash_mapping", return_value=""))
         stack.enter_context(patch.object(func_resolve._io, "upload_resolution_set"))
         stack.enter_context(patch.object(func_resolve.slack, "send_message"))
+        # main's resolve downloads the published question set from GitHub; serve it offline.
+        stack.enter_context(
+            patch.object(
+                func_resolve._io,
+                "read_question_set_json",
+                side_effect=lambda filename, run_locally=False: (
+                    _LLM_QSET if "llm" in filename else _HUMAN_QSET
+                ),
+            )
+        )
         func_resolve.driver(None)
 
     return local_bucket.read_processed_forecast_set(_DUE, _FILENAME)

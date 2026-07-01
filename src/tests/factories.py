@@ -228,6 +228,7 @@ def make_leaderboard_entries(
                     "resolved": True,
                     "imputed": False,
                     "model_age_at_due_date": 0,
+                    "external_submission": False,
                 }
             )
     return pd.DataFrame(rows)

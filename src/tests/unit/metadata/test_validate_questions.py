@@ -1,6 +1,6 @@
 """Unit tests for the ``metadata/validate_questions`` LLM gate.
 
-Same model-boundary pattern as the tagger: MOCK ``model_eval.get_response_from_model`` and assert
+Same model-boundary pattern as the tagger: MOCK ``metadata_llm.get_metadata_model_response`` and assert
 the parsing of its raw text — ``Classification: ok`` -> valid, ``flag`` -> invalid, a missing
 ``Classification:`` -> left unvalidated (``""``), and an ambiguous verdict -> default-valid. The
 model's actual judgement is out of scope.
@@ -30,7 +30,7 @@ def test_validate_parses_each_verdict():
         ]
     )
 
-    def fake_model(model_name, prompt, max_tokens=None):
+    def fake_model(prompt, max_output_tokens=None):
         if "Q-ok" in prompt:
             return "Reasoning...\nClassification: ok"
         if "Q-flag" in prompt:
@@ -39,7 +39,7 @@ def test_validate_parses_each_verdict():
             return "I have no verdict here."  # no 'Classification:' -> None -> left ""
         return "Classification: hmmm"  # ambiguous (neither ok nor flag) -> default True
 
-    with patch.object(validate.model_eval, "get_response_from_model", side_effect=fake_model):
+    with patch.object(validate.metadata_llm, "get_metadata_model_response", side_effect=fake_model):
         out = validate.validate_questions(df)
 
     by_id = dict(zip(out["id"], out["valid_question"]))
@@ -60,12 +60,12 @@ def test_incidental_ok_substring_does_not_override_an_explicit_flag():
         ]
     )
 
-    def fake_model(model_name, prompt, max_tokens=None):
+    def fake_model(prompt, max_output_tokens=None):
         if "Q-sneaky" in prompt:
             return "Classification:\nThis looks broken and inappropriate, flag"
         return "Classification: ok, this is not a flag"  # first standalone token is 'ok'
 
-    with patch.object(validate.model_eval, "get_response_from_model", side_effect=fake_model):
+    with patch.object(validate.metadata_llm, "get_metadata_model_response", side_effect=fake_model):
         out = validate.validate_questions(df)
 
     by_id = dict(zip(out["id"], out["valid_question"]))
@@ -77,7 +77,7 @@ def test_model_error_defaults_to_valid():
     df = _to_validate([{"id": "boom", "question": "Q-boom"}])
 
     with patch.object(
-        validate.model_eval, "get_response_from_model", side_effect=RuntimeError("API down")
+        validate.metadata_llm, "get_metadata_model_response", side_effect=RuntimeError("API down")
     ):
         out = validate.validate_questions(df)
 
