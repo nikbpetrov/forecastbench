@@ -35,6 +35,8 @@ COLD_IMPORT_MODULES = [
     "curate_questions.create_question_set.main",  # question_curation -> all sources' intros
     "helpers.metadata_llm",  # metadata LLM model run built lazily; importing reads no secret
     "questions.fred.fetch.main",  # legacy job whose API params must not read a secret at import
+    "orchestration.func_llm_forecaster_worker.main",  # runner + fb_model_runs + shared LLM registry
+    "orchestration.func_llm_forecaster_manager.main",  # cloud_run glue + fb_model_runs
 ]
 
 # Job entry points + the heavy shared modules that historically did work at import time.
@@ -50,6 +52,8 @@ JOB_MODULES = [
     "orchestration.func_yfinance_fetch.main",
     "orchestration.func_yfinance_update.main",
     "orchestration.func_resolve.main",
+    "orchestration.func_llm_forecaster_worker.main",
+    "orchestration.func_llm_forecaster_manager.main",
     "metadata.tag_questions.main",
     "metadata.validate_questions.main",
     "curate_questions.create_question_set.main",
@@ -238,3 +242,38 @@ def test_no_network_guard_blocks_real_connections():
     with pytest.raises(BlockedNetworkError):
         s.connect(("93.184.216.34", 80))  # example.com
     s.close()
+
+
+def test_smoke_test_tooling_imports_without_orchestration_io():
+    """The LLM smoke-test tool imports its orchestration IO lazily, not at module import.
+
+    Deploy-shape guard: ``llm_forecaster.smoke_test`` is operator tooling that must import cleanly
+    even where ``orchestration._io`` / ``termcolor`` are unavailable, so it defers those imports to
+    call time. A cold subprocess blocks both modules and imports the tool; a clean exit proves the
+    deferral holds.
+    """
+    code = """
+import importlib.abc
+import sys
+
+class Blocker(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in {"orchestration._io", "termcolor"}:
+            raise ModuleNotFoundError(f"No module named {fullname!r}")
+        return None
+
+sys.meta_path.insert(0, Blocker())
+import llm_forecaster.smoke_test
+print("ok")
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        check=False,
+        text=True,
+        capture_output=True,
+        env={**os.environ, "PYTHONPATH": "src"},
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "ok"

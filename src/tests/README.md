@@ -79,14 +79,15 @@ In-memory, one concern per test, the bulk of the suite. External HTTP is mocked 
 source** (`@patch("sources.X.requests.get")`); the LLM is mocked at `model_eval.get_response_from_model`.
 
 
-| Stage / area              | What's pinned                                                                                                                                                                                                         |
-| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **sources** (per source)  | parsing of fetched payloads, `update()` assembly, and `resolve()` outcomes — one `unit/sources/test_<source>.py` each                                                                                                 |
-| **source base classes**   | `BaseSource` / market / dataset shared behavior, hashable id/direction columns, types & schemas, date helpers, cross-source invariants                                                                                |
-| **resolve**               | `resolve_all` (market + dataset), `impute_missing_forecasts` (0.5 / Naive / Imputed), `check_and_prepare_forecast_file` (drop/validate), `explode_question_set`                                                       |
-| **metadata** (LLM mocked) | tag parsing → `category ∈ QUESTION_CATEGORIES` (unknown → `Other`); validate parsing → `ok` / `flag` / missing / ambiguous                                                                                            |
-| **curate_questions**      | `allocate_evenly` invariants (even / capped / over-request *raises*), market+horizon bin math, validity + freeze filters, `drop_invalid` `(id, source)` join, **seeded** human + LLM sampling                         |
-| **leaderboard**           | Brier / peer / Brier-skill scoring, question masks, `get_df_info` + `question_pk`, ordering invariants, artifact serializers, and **2FE + bootstrap** on a real-data-shaped fixture (`test_two_way_fixed_effects.py`) |
+| Stage / area                    | What's pinned                                                                                                                                                                                                                                                                                                                                     |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **sources** (per source)        | parsing of fetched payloads, `update()` assembly, and `resolve()` outcomes — one `unit/sources/test_<source>.py` each                                                                                                                                                                                                                             |
+| **source base classes**         | `BaseSource` / market / dataset shared behavior, hashable id/direction columns, types & schemas, date helpers, cross-source invariants                                                                                                                                                                                                            |
+| **resolve**                     | `resolve_all` (market + dataset), `impute_missing_forecasts` (0.5 / Naive / Imputed), `check_and_prepare_forecast_file` (drop/validate), `explode_question_set`                                                                                                                                                                                   |
+| **metadata** (LLM mocked)       | tag parsing → `category ∈ QUESTION_CATEGORIES` (unknown → `Other`); validate parsing → `ok` / `flag` / missing / ambiguous                                                                                                                                                                                                                        |
+| **curate_questions**            | `allocate_evenly` invariants (even / capped / over-request *raises*), market+horizon bin math, validity + freeze filters, `drop_invalid` `(id, source)` join, **seeded** human + LLM sampling                                                                                                                                                     |
+| **leaderboard**                 | Brier / peer / Brier-skill scoring, question masks, `get_df_info` + `question_pk`, ordering invariants, artifact serializers, **2FE + bootstrap** on a real-data-shaped fixture (`test_two_way_fixed_effects.py`), and **LLM identities** (`normalize_llm_identity`, release-date joins, baseline/tournament classification)                      |
+| **llm_forecaster** (LLM mocked) | forecast variants + model-run registry/options, response parsing, prompt rendering + digests, question-set split/limit, **runner** forecasting (concurrency, per-question error handling, dataset-sharing across variants, sorting, transcript writing), and the smoke-test CLI — `unit/llm_forecaster/` (LLM mocked at the run's `get_response`) |
 
 
 > No shared recorded-fixture replay layer is kept on purpose: parse paths are covered here, and
@@ -146,10 +147,11 @@ complementary: the anchors pin *what's correct*, the golden is the catch-all net
 else that moved*, so a wrong re-bless that flips behavior still trips an anchor.
 
 
-| Flow                                                        | Stages exercised                                                                                                                                | Golden snapshot                                          |
-| ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| **forecast resolution** (`test_resolution_pipeline.py`)     | bucket update (polymarket) + seeded banks → `explode_question_set` → `resolve_all` → impute → leaderboard scoring/ordering                      | resolved frame + scored leaderboard, × {base, nullified} |
-| **question-set creation** (`test_question_set_pipeline.py`) | seed banks + metadata → tag/validate `driver()` → `drop_invalid` / freeze filters → **curate** `driver()` → published `<date>-{llm,human}.json` | the published question set (llm + human)                 |
+| Flow                                                        | Stages exercised                                                                                                                                | Golden snapshot                                                                          |
+| ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| **forecast resolution** (`test_resolution_pipeline.py`)     | bucket update (polymarket) + seeded banks → `explode_question_set` → `resolve_all` → impute → leaderboard scoring/ordering                      | resolved frame + scored leaderboard, × {base, nullified}                                 |
+| **question-set creation** (`test_question_set_pipeline.py`) | seed banks + metadata → tag/validate `driver()` → `drop_invalid` / freeze filters → **curate** `driver()` → published `<date>-{llm,human}.json` | the published question set (llm + human)                                                 |
+| **LLM forecaster** (`test_llm_forecaster_pipeline.py`)      | question set (real published record shape) → `runner.run_model` (LLM boundary mocked) → `_llm_forecaster_io` writes the final forecast set      | the forecast set, both active variants (`@live` companion checks the real published set) |
 
 
 > The leaderboard's real ranking method (2FE + bootstrap) also has a golden, but in
@@ -197,28 +199,27 @@ use `freeze_today`; seed any RNG; never rely on row ordering.
 ## Adding tests
 
 
-| You want to test…                                                             | Put it in                                                                                               |
-| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| A source's parse/update/resolution edge case on synthetic data                | `unit/sources/test_<source>.py` (`make_*` factories; mock `requests` ad-hoc)                            |
-| A `resolve` / `leaderboard` / `metadata` / `curate_questions` logic edge case | `unit/<area>/` (mock `model_eval.get_response_from_model` for the LLM)                                  |
-| A guarantee every source/stage must satisfy                                   | `contract/` (parametrize over the registry or the job list)                                             |
-| A new source's `driver()` wiring                                              | nothing — `integration/test_source_drivers.py` is registry-parametrized; only add a test if it diverges |
-| Another job's `driver()` against the bucket                                   | `integration/test_<job>_*.py` with `local_bucket`                                                       |
-| The forecast-resolution flow to the leaderboard                               | `e2e/test_resolution_pipeline.py` (anchors + `check_golden`)                                            |
-| The question-set creation flow                                                | `e2e/test_question_set_pipeline.py` (metadata → curate driver + `check_golden`)                         |
-| An external API's field contract                                              | `live/` (mark `@pytest.mark.live`)                                                                      |
+| You want to test…                                                                           | Put it in                                                                                               |
+| ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| A source's parse/update/resolution edge case on synthetic data                              | `unit/sources/test_<source>.py` (`make_*` factories; mock `requests` ad-hoc)                            |
+| A `resolve` / `leaderboard` / `metadata` / `curate_questions` logic edge case               | `unit/<area>/` (mock `model_eval.get_response_from_model` for the LLM)                                  |
+| An `llm_forecaster` (runner / parsing / prompts / output / variants / model-runs) edge case | `unit/llm_forecaster/` (mock the model run's `get_response`)                                            |
+| A guarantee every source/stage must satisfy                                                 | `contract/` (parametrize over the registry or the job list)                                             |
+| A new source's `driver()` wiring                                                            | nothing — `integration/test_source_drivers.py` is registry-parametrized; only add a test if it diverges |
+| Another job's `driver()` against the bucket                                                 | `integration/test_<job>_*.py` with `local_bucket`                                                       |
+| The forecast-resolution flow to the leaderboard                                             | `e2e/test_resolution_pipeline.py` (anchors + `check_golden`)                                            |
+| The question-set creation flow                                                              | `e2e/test_question_set_pipeline.py` (metadata → curate driver + `check_golden`)                         |
+| An external API's field contract                                                            | `live/` (mark `@pytest.mark.live`)                                                                      |
 
 
 
 
 ## Not yet covered
 
-- `base_eval` (naive + LLM forecasters) — deferred; an incoming PR reshapes the job. When it
-lands: naive forecasters are data-in/data-out → invariants in `unit/`; LLM forecasters → the same
-mock-the-boundary technique as `metadata`; schema + golden the forecast-set output.
-- `nightly_update_workflow` (manager/worker) — the DAG/scheduling logic is testable offline with
-a fake job runner, but needs a small refactor first (extract `compute_dag` + a pluggable runner
-from the Cloud Run glue).
+- `nightly_update_workflow` (DAG/scheduling) — testable offline with a fake job runner, but needs a
+small refactor first (extract `compute_dag` + a pluggable runner from the Cloud Run glue). NB the
+`func_llm_forecaster_{worker,manager}` Cloud Run entrypoints themselves **are** covered
+(`unit/orchestration/` + the offline-import contract).
 - `www.forecastbench.org` (Jekyll) — site build belongs in a separate, non-Python CI lane.
 
 **The LLM boundary technique.** `metadata` (and `base_eval`'s LLM forecasters) talk to a
