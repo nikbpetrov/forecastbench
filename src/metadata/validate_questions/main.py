@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import re
 import sys
 import time
 
@@ -39,14 +40,18 @@ async def _validate_single_question(index, question, semaphore):
                 return (index, None, question)
 
             end_resp = response.split("Classification:")[1]
-            if "ok" in end_resp:
-                return (index, True, question)
-            elif "flag" in end_resp:
-                logger.info(f"Ill-defined question: {question}")
-                return (index, False, question)
-            else:
+            # Match the first standalone verdict token. A bare ``"ok" in end_resp`` would match the
+            # substring inside words like "looks"/"book" and, being checked first, could silently
+            # un-flag a question the model meant to flag. Word boundaries + first-match avoid that
+            # while leaving well-formed "Classification: ok"/"Classification: flag" unchanged.
+            verdict = re.search(r"\b(ok|flag)\b", end_resp, re.IGNORECASE)
+            if verdict is None:
                 logger.error(f"Ambiguous response for: {question}")
                 return (index, True, question)
+            if verdict.group(1).lower() == "flag":
+                logger.info(f"Ill-defined question: {question}")
+                return (index, False, question)
+            return (index, True, question)
         except Exception as e:
             logger.error(f"Error validating question: {e}")
             return (index, True, question)

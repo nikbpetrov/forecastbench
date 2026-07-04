@@ -92,7 +92,7 @@ $(ALL_REQUIREMENTS_STAMP): Makefile $(ROOT_REQUIREMENTS_STAMP) $(SRC_REQUIREMENT
 install-requirements: $(ALL_REQUIREMENTS_STAMP)
 
 setup-python-env: install-requirements
-	@:
+	@. ${ROOT_DIR}.venv/bin/activate && python ${ROOT_DIR}scripts/patch_fri_utils.py
 
 check-failures:
 	@echo "Checking for failures..."

@@ -88,6 +88,11 @@ def driver(_):
     )
     if "category" not in dfmeta.columns:
         dfmeta["category"] = ""
+    if "valid_question" not in dfmeta.columns:
+        # Guard symmetrically with ``category``: ``dfq[META_DATA_FILE_COLUMNS]`` below selects
+        # ``valid_question`` too, so a metadata file written before the validate pass (or by an
+        # older schema) would otherwise KeyError here.
+        dfmeta["valid_question"] = ""
 
     for source, _ in question_curation.FREEZE_QUESTION_SOURCES.items():
         logger.info(f"Getting categories for {source} questions.")

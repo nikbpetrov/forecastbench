@@ -261,12 +261,21 @@ class InferSource(MarketSource):
         all_forecasts: list[tuple] = []
         for forecast in all_responses:
             if not has_existing or pd.to_datetime(forecast["created_at"], utc=True) > last_date:
-                if len(forecast["predictions"]) == 2:
-                    forecast_yes = forecast["predictions"][0]
+                predictions = forecast["predictions"]
+                if len(predictions) == 2:
+                    forecast_yes = predictions[0]
                     if forecast_yes["answer_name"] == "No":
-                        forecast_yes = forecast["predictions"][1]
-                elif len(forecast["predictions"]) == 1:
-                    forecast_yes = forecast["predictions"][0]
+                        forecast_yes = predictions[1]
+                elif len(predictions) == 1:
+                    forecast_yes = predictions[0]
+                else:
+                    # Skip an unexpected shape rather than append a stale/unbound ``forecast_yes``
+                    # carried over from a previous iteration (or raise NameError on the first one).
+                    logger.warning(
+                        f"Skipping prediction set with {len(predictions)} predictions "
+                        f"for question {question_id}."
+                    )
+                    continue
 
                 all_forecasts.append(
                     (
@@ -359,7 +368,7 @@ class InferSource(MarketSource):
         if (
             existing_df is not None
             and not existing_df.empty
-            and pd.to_datetime(existing_df["date"].iloc[-1]).tz_localize("UTC") >= yesterday
+            and pd.to_datetime(existing_df["date"]).max().tz_localize("UTC") >= yesterday
         ):
             logger.info(f"{question['id']} is skipped because it's already up-to-date!")
             return existing_df
